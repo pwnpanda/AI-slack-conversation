@@ -50,6 +50,16 @@ class Session:
     status: str
 
 
+@dataclass(frozen=True)
+class Event:
+    id: int
+    cc_session_id: str
+    ts: int
+    kind: str
+    payload: str
+    slack_msg_ts: str | None
+
+
 class Registry:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
@@ -151,6 +161,41 @@ class Registry:
         if prior_thread:
             self.set_thread_ts(cc_session_id, prior_thread)
         return prior_thread
+
+    def buffer_event(self, cc_session_id: str, kind: str, payload: str) -> int:
+        cur = self._c().execute(
+            "INSERT INTO event_log (cc_session_id, ts, kind, payload) VALUES (?, ?, ?, ?)",
+            (cc_session_id, int(time.time()), kind, payload),
+        )
+        return cur.lastrowid or 0
+
+    def drain_unposted(self, cc_session_id: str) -> list[Event]:
+        rows = (
+            self._c()
+            .execute(
+                "SELECT id, cc_session_id, ts, kind, payload, slack_msg_ts FROM event_log "
+                "WHERE cc_session_id = ? AND slack_msg_ts IS NULL ORDER BY id ASC",
+                (cc_session_id,),
+            )
+            .fetchall()
+        )
+        return [
+            Event(
+                id=r["id"],
+                cc_session_id=r["cc_session_id"],
+                ts=r["ts"],
+                kind=r["kind"],
+                payload=r["payload"],
+                slack_msg_ts=r["slack_msg_ts"],
+            )
+            for r in rows
+        ]
+
+    def mark_event_posted(self, event_id: int, slack_msg_ts: str) -> None:
+        self._c().execute(
+            "UPDATE event_log SET slack_msg_ts = ? WHERE id = ?",
+            (slack_msg_ts, event_id),
+        )
 
 
 def _row_to_session(row: sqlite3.Row) -> Session:

@@ -82,3 +82,34 @@ def test_get_session_missing_returns_none(tmp_db_path: str) -> None:
     reg.open()
     assert reg.get_session("nope") is None
     reg.close()
+
+
+def test_buffer_and_drain_events(tmp_db_path: str) -> None:
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("abc", "/x", "s", "p")
+    reg.buffer_event("abc", "prompt", '{"text":"hello"}')
+    reg.buffer_event("abc", "response", '{"text":"hi"}')
+    pending = reg.drain_unposted("abc")
+    assert len(pending) == 2
+    assert pending[0].kind == "prompt"
+    assert pending[1].kind == "response"
+    for ev in pending:
+        reg.mark_event_posted(ev.id, "1.0")
+    assert reg.drain_unposted("abc") == []
+    reg.close()
+
+
+def test_buffer_event_preserves_order(tmp_db_path: str) -> None:
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("abc", "/x", "s", "p")
+    for i in range(5):
+        reg.buffer_event("abc", "prompt", f'{{"i":{i}}}')
+    events = reg.drain_unposted("abc")
+    assert [e.payload for e in events] == [f'{{"i":{i}}}' for i in range(5)]
+    reg.close()
