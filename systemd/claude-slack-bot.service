@@ -1,0 +1,17 @@
+[Unit]
+Description=Bridge Claude Code sessions into Slack
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/claude-slack-bot/env
+WorkingDirectory=%h/git/priv/claude-slack-bot
+ExecStart=%h/git/priv/claude-slack-bot/.venv/bin/python -m slackbot
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
