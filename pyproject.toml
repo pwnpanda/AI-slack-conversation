@@ -1,0 +1,33 @@
+[project]
+name = "claude-slack-bot"
+version = "0.1.0"
+description = "Bridge Claude Code sessions into Slack threads with reply injection via Zellij"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "aiohttp==3.11.10",
+  "slack-bolt==1.21.2",
+  "slack-sdk==3.33.4",
+]
+
+[dependency-groups]
+dev = [
+  "pytest==8.3.4",
+  "pytest-asyncio==0.24.0",
+  "pytest-aiohttp==1.0.5",
+  "ruff==0.8.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.5"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
