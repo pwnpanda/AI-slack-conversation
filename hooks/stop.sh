@@ -9,15 +9,24 @@ sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
 transcript="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
 last_text=""
 if [ -n "$transcript" ] && [ -r "$transcript" ]; then
+  # CC may fire Stop before flushing the latest assistant message to disk.
+  # A brief sleep mitigates the race; we then re-read.
+  sleep 0.4
+  # Read transcript reversed line-by-line; first non-empty assistant text wins.
   # content may be a string (older format) or an array of blocks (current).
-  # Extract text from text-type blocks; join with newline if multiple.
-  last_text="$(tac "$transcript" 2>/dev/null \
-    | jq -r 'select(.message.role=="assistant") | .message.content
-              | if type == "string" then .
-                elif type == "array" then
-                  map(select(.type == "text") | .text) | join("\n")
-                else empty end' 2>/dev/null \
-    | awk 'NF { print; exit }' || true)"
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    txt="$(printf '%s' "$line" | jq -r '
+      select(.message.role == "assistant") | .message.content
+      | if type == "string" then .
+        elif type == "array" then (map(select(.type == "text") | .text) | join("\n"))
+        else empty end
+    ' 2>/dev/null || true)"
+    if [ -n "$txt" ]; then
+      last_text="$txt"
+      break
+    fi
+  done < <(tac "$transcript" 2>/dev/null)
 fi
 
 payload="$(jq -n --arg sid "$sid" --arg t "$last_text" \
