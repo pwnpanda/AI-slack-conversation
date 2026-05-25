@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Protocol
+
+log = logging.getLogger(__name__)
 
 
 class _AsyncSlackClient(Protocol):
@@ -30,4 +33,8 @@ class SlackIO:
         await self._client.chat_update(channel=self._channel, ts=ts, text=text)
 
     async def react(self, ts: str, emoji: str) -> None:
-        await self._client.reactions_add(channel=self._channel, timestamp=ts, name=emoji)
+        # Reactions are cosmetic confirmation; never let them fail a delivery.
+        try:
+            await self._client.reactions_add(channel=self._channel, timestamp=ts, name=emoji)
+        except Exception as exc:
+            log.warning("reaction %s on %s failed (non-fatal): %s", emoji, ts, exc)
