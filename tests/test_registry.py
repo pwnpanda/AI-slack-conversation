@@ -60,10 +60,13 @@ def test_claim_name_returns_prior_holder(tmp_db_path: str) -> None:
     assert prior_thread == "111.222"
     old_sess = reg.get_session("old")
     assert old_sess is not None and old_sess.name is None
+    assert old_sess.slack_thread_ts is None  # ownership transferred away
     new_sess = reg.get_session("new")
     assert new_sess is not None
     assert new_sess.name == "shared"
     assert new_sess.slack_thread_ts == "111.222"
+    # thread lookup now resolves to the new claimant
+    assert reg.get_session_by_thread("111.222").cc_session_id == "new"
     reg.close()
 
 

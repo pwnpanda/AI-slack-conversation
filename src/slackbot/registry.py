@@ -157,6 +157,12 @@ class Registry:
         prior_thread: str | None = prior["slack_thread_ts"] if prior else None
         if prior:
             self.clear_name(prior["cc_session_id"])
+            # Transfer thread ownership: clear from prior so get_session_by_thread
+            # routes future replies to the new claimant only.
+            self._c().execute(
+                "UPDATE sessions SET slack_thread_ts = NULL WHERE cc_session_id = ?",
+                (prior["cc_session_id"],),
+            )
         self.set_name(cc_session_id, name)
         if prior_thread:
             self.set_thread_ts(cc_session_id, prior_thread)
