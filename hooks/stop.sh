@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 PORT="${SLACKBOT_PORT:-8787}"
+agent="${SLACKBOT_AGENT:-claude}"
 input="$(cat || true)"
-sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
-[ -z "$sid" ] && exit 0
+sid="$(printf '%s' "$input" | jq -r '.session_id // env.GEMINI_SESSION_ID // empty' 2>/dev/null || true)"
+if [ -z "$sid" ]; then
+  printf '{}\n'
+  exit 0
+fi
 
-# Best-effort: pull last assistant message from transcript_path if available
+# Codex and Gemini expose the response directly. Claude falls back to transcript parsing.
+last_text="$(printf '%s' "$input" | jq -r '.last_assistant_message // .prompt_response // empty' 2>/dev/null || true)"
 transcript="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
-last_text=""
-if [ -n "$transcript" ] && [ -r "$transcript" ]; then
+if [ -z "$last_text" ] && [ -n "$transcript" ] && [ -r "$transcript" ]; then
   # CC may fire Stop before flushing the latest assistant message to disk.
   # A brief sleep mitigates the race; we then re-read.
   sleep 0.4
@@ -29,8 +33,9 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
   done < <(tac "$transcript" 2>/dev/null)
 fi
 
-payload="$(jq -n --arg sid "$sid" --arg t "$last_text" \
-  '{v:1,kind:"response",session_id:$sid,text:$t}')"
+payload="$(jq -n --arg sid "$sid" --arg agent "$agent" --arg t "$last_text" \
+  '{v:1,kind:"response",session_id:$sid,agent:$agent,text:$t}')"
 curl -fsS --max-time 1 -H 'content-type: application/json' \
   -d "$payload" "http://127.0.0.1:${PORT}/event" >/dev/null 2>&1 || true
+printf '{}\n'
 exit 0

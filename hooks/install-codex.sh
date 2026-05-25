@@ -4,11 +4,9 @@ set -euo pipefail
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 python3 "${SOURCE_DIR}/install_agent_hooks.py" \
-  --agent claude \
-  --settings "${HOME}/.claude/settings.json" \
-  --hooks-dir "${HOME}/.claude/hooks/claude-slack-bot" \
+  --agent codex \
+  --settings "${HOME}/.codex/hooks.json" \
+  --hooks-dir "${HOME}/.codex/hooks/claude-slack-bot" \
   SessionStart:session_start.sh \
   UserPromptSubmit:prompt.sh \
-  Stop:stop.sh \
-  Notification:notify.sh \
-  SessionEnd:session_end.sh
+  Stop:stop.sh

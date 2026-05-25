@@ -12,11 +12,15 @@ class Config:
     slack_bot_token: str
     slack_app_token: str
     slack_channel_id: str
+    agent_channels: dict[str, str]
     port: int
     db_path: str
     tmp_dir: str
     verbose: str
     log_level: str
+
+    def channel_for_agent(self, agent: str) -> str:
+        return self.agent_channels.get(agent.lower(), self.slack_channel_id)
 
 
 def _require(name: str) -> str:
@@ -31,11 +35,21 @@ def _default_db_path() -> str:
     return str(Path(state) / "claude-slack-bot" / "registry.db")
 
 
+def _agent_channels() -> dict[str, str]:
+    channels = {}
+    for agent in ("claude", "codex", "gemini"):
+        channel = os.environ.get(f"SLACK_CHANNEL_ID_{agent.upper()}")
+        if channel:
+            channels[agent] = channel
+    return channels
+
+
 def load_config() -> Config:
     return Config(
         slack_bot_token=_require("SLACK_BOT_TOKEN"),
         slack_app_token=_require("SLACK_APP_TOKEN"),
         slack_channel_id=_require("SLACK_CHANNEL_ID"),
+        agent_channels=_agent_channels(),
         port=int(os.environ.get("SLACKBOT_PORT", "8787")),
         db_path=os.environ.get("SLACKBOT_DB_PATH") or _default_db_path(),
         tmp_dir=os.environ.get("SLACKBOT_TMP_DIR", "/tmp"),

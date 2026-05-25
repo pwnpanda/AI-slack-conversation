@@ -28,10 +28,11 @@ class FakeSlackClient:
 @pytest.mark.asyncio
 async def test_post_top_level_returns_ts() -> None:
     fake = FakeSlackClient()
-    io = SlackIO(fake, channel="C1")
-    ts = await io.post_top_level("🟢 myproj")
+    io = SlackIO(fake, channel="C1", agent_channels={"codex": "C-CODEX"})
+    ts = await io.post_top_level("🟢 myproj", channel=io.channel_for_agent("codex"))
     assert ts == fake.next_ts
-    assert fake.posted[0] == {"channel": "C1", "text": "🟢 myproj"}
+    assert fake.posted[0] == {"channel": "C-CODEX", "text": "🟢 myproj"}
+    assert io.channel_for_agent("gemini") == "C1"
 
 
 @pytest.mark.asyncio

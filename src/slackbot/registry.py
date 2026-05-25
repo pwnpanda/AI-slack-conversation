@@ -10,6 +10,7 @@ from pathlib import Path
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
   cc_session_id   TEXT PRIMARY KEY,
+  agent           TEXT NOT NULL DEFAULT 'claude',
   name            TEXT,
   cwd             TEXT NOT NULL,
   zellij_session  TEXT,
@@ -39,6 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_event_log_unposted
 @dataclass(frozen=True)
 class Session:
     cc_session_id: str
+    agent: str
     name: str | None
     cwd: str
     zellij_session: str | None
@@ -70,6 +72,16 @@ class Registry:
         self._conn = sqlite3.connect(self._db_path, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        columns = {
+            row["name"] for row in self._c().execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "agent" not in columns:
+            self._c().execute(
+                "ALTER TABLE sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'"
+            )
 
     def close(self) -> None:
         if self._conn is not None:
@@ -87,21 +99,25 @@ class Registry:
         cwd: str,
         zellij_session: str | None,
         zellij_pane_id: str | None,
+        agent: str = "claude",
+        slack_channel: str | None = None,
     ) -> None:
         now = int(time.time())
         self._c().execute(
             """
-            INSERT INTO sessions (cc_session_id, cwd, zellij_session, zellij_pane_id,
-                                  created_at, last_event_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'active')
+            INSERT INTO sessions (cc_session_id, agent, cwd, zellij_session, zellij_pane_id,
+                                  slack_channel, created_at, last_event_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
             ON CONFLICT(cc_session_id) DO UPDATE SET
+              agent = excluded.agent,
               cwd = excluded.cwd,
               zellij_session = excluded.zellij_session,
               zellij_pane_id = excluded.zellij_pane_id,
+              slack_channel = excluded.slack_channel,
               last_event_at = excluded.last_event_at,
               status = 'active'
             """,
-            (cc_session_id, cwd, zellij_session, zellij_pane_id, now, now),
+            (cc_session_id, agent, cwd, zellij_session, zellij_pane_id, slack_channel, now, now),
         )
 
     def get_session(self, cc_session_id: str) -> Session | None:
@@ -112,12 +128,23 @@ class Registry:
         )
         return _row_to_session(row) if row else None
 
-    def get_session_by_thread(self, thread_ts: str) -> Session | None:
-        row = (
-            self._c()
-            .execute("SELECT * FROM sessions WHERE slack_thread_ts = ?", (thread_ts,))
-            .fetchone()
-        )
+    def get_session_by_thread(self, thread_ts: str, channel: str | None = None) -> Session | None:
+        if channel:
+            row = (
+                self._c()
+                .execute(
+                    "SELECT * FROM sessions "
+                    "WHERE slack_thread_ts = ? AND (slack_channel = ? OR slack_channel IS NULL)",
+                    (thread_ts, channel),
+                )
+                .fetchone()
+            )
+        else:
+            row = (
+                self._c()
+                .execute("SELECT * FROM sessions WHERE slack_thread_ts = ?", (thread_ts,))
+                .fetchone()
+            )
         return _row_to_session(row) if row else None
 
     def set_name(self, cc_session_id: str, name: str) -> None:
@@ -145,16 +172,20 @@ class Registry:
 
     def claim_name(self, cc_session_id: str, name: str) -> str | None:
         """Claim `name` for `cc_session_id`. Returns prior holder's thread_ts (or None)."""
+        current = self.get_session(cc_session_id)
+        current_channel = current.slack_channel if current else None
         prior = (
             self._c()
             .execute(
-                "SELECT cc_session_id, slack_thread_ts FROM sessions "
+                "SELECT cc_session_id, slack_channel, slack_thread_ts FROM sessions "
                 "WHERE name = ? AND cc_session_id != ?",
                 (name, cc_session_id),
             )
             .fetchone()
         )
-        prior_thread: str | None = prior["slack_thread_ts"] if prior else None
+        prior_thread: str | None = None
+        if prior and prior["slack_channel"] == current_channel:
+            prior_thread = prior["slack_thread_ts"]
         if prior:
             self.clear_name(prior["cc_session_id"])
             # Transfer thread ownership: clear from prior so get_session_by_thread
@@ -207,6 +238,7 @@ class Registry:
 def _row_to_session(row: sqlite3.Row) -> Session:
     return Session(
         cc_session_id=row["cc_session_id"],
+        agent=row["agent"],
         name=row["name"],
         cwd=row["cwd"],
         zellij_session=row["zellij_session"],

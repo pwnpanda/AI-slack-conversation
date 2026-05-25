@@ -1,10 +1,10 @@
 # claude-slack-bot
 
-Bridge between Claude Code sessions and Slack: mirrors selected CC sessions into Slack threads, and types your Slack replies back into the originating Zellij pane.
+Bridge between Claude Code, Codex, and Gemini CLI sessions and Slack: mirrors selected agent sessions into Slack threads, and types your Slack replies back into the originating Zellij pane.
 
 ## What this does
 
-Registers a Claude Code session with `/rn <name>` to opt it into Slack mirroring. The bot posts a top-level message naming the session and mirrors every subsequent prompt, response, and notification into the thread beneath it. Replying in that Slack thread types your reply into the originating Zellij pane (via `zellij action write-chars`).
+Registers Claude sessions with `/rn <name>`, and auto-registers Codex/Gemini sessions because those CLIs do not provide the same custom slash-command path. The bot posts a top-level message naming the session and mirrors every subsequent prompt, response, and notification into the thread beneath it. Replying in that Slack thread types your reply into the originating Zellij pane (via `zellij action write-chars`).
 
 ## Use cases
 
@@ -20,7 +20,7 @@ Registers a Claude Code session with `/rn <name>` to opt it into Slack mirroring
 - Zellij ≥ 0.44
 - `jq`, `curl` (for hook scripts)
 - A Slack workspace where you can create an app
-- Claude Code CLI
+- Claude Code CLI, Codex CLI, or Gemini CLI
 
 ## Installation / Setup
 
@@ -45,6 +45,10 @@ cat > ~/.config/claude-slack-bot/env <<'EOF'
 SLACK_BOT_TOKEN=xoxb-…
 SLACK_APP_TOKEN=xapp-…
 SLACK_CHANNEL_ID=C…
+# Optional: route agents to separate Slack channels. Defaults to SLACK_CHANNEL_ID.
+# SLACK_CHANNEL_ID_CLAUDE=C…
+# SLACK_CHANNEL_ID_CODEX=C…
+# SLACK_CHANNEL_ID_GEMINI=C…
 SLACKBOT_PORT=8787
 LOG_LEVEL=INFO
 EOF
@@ -65,20 +69,29 @@ systemctl --user status claude-slack-bot
 
 Expected status: `active (running)`.
 
-### 4. Install the CC hooks
+### 4. Install the agent hooks
 
 ```bash
 bash ~/git/priv/claude-slack-bot/hooks/install.sh
+bash ~/git/priv/claude-slack-bot/hooks/install-codex.sh
+bash ~/git/priv/claude-slack-bot/hooks/install-gemini.sh
 ```
 
-This copies the five hook scripts into `~/.claude/hooks/claude-slack-bot/` and merges hook entries into `~/.claude/settings.json`.
+This installs the bridge hooks for Claude, Codex, and Gemini:
+
+- Claude: `~/.claude/settings.json`
+- Codex: `~/.codex/hooks.json`
+- Gemini: `~/.gemini/settings.json`
+
+All three post the same event contract to the daemon and include an agent label.
 
 ## Usage
 
-1. Start Claude Code inside a Zellij pane
-2. Run `/rn my-session` — top-level message appears in your configured Slack channel
-3. Type prompts in CC; they mirror into the Slack thread
-4. From Slack (mobile or desktop), reply in the thread — the text is typed into the CC pane (CC pane briefly takes focus)
+1. Start your agent inside a Zellij pane
+2. Claude: run `/rn my-session`; Codex/Gemini: the thread appears automatically
+3. Codex: optionally rename the thread with `rn my-session`; the hook blocks that control prompt from reaching the model
+4. Type prompts in the agent; they mirror into the Slack thread
+5. From Slack (mobile or desktop), reply in the thread — the text is typed into the agent pane (the pane briefly takes focus)
 
 ## Testing
 
@@ -130,7 +143,11 @@ journalctl --user -u claude-slack-bot -f
 - SQLite-backed session/event registry
 - Slack Socket Mode listener (no inbound port required)
 - Top-level message per named session, thread per session lifetime
-- Event buffering for prompts that arrive before `/rn`
+- Codex/Gemini auto-registration with names like `codex-project-abcdef12`
+- Portable Codex rename prompt: `rn my-session`
+- Agent labels in Slack messages: `[Claude]`, `[Codex]`, `[Gemini]`
+- Optional per-agent Slack channels via `SLACK_CHANNEL_ID_CLAUDE`, `SLACK_CHANNEL_ID_CODEX`, `SLACK_CHANNEL_ID_GEMINI`
+- Event buffering for prompts that arrive before naming
 - Resume detection: same `session_id` → flips top-level back to 🟢
 - Name reclaim: new session adopting an existing name reuses the same thread
 - Reply routing: thread reply → `zellij action write-chars` into the originating pane
@@ -148,4 +165,8 @@ journalctl --user -u claude-slack-bot -f
 
 | Session | Summary | Date |
 |---------|---------|------|
+| `test-conversation` | Confirmed the Codex session wiring and explained the rename hook block message. | 2026-05-25 |
+| `codex-auto-register` | Added Codex/Gemini auto-registration and a portable `rn name` rename prompt. | 2026-05-25 |
+| `agent-prefix-routing` | Added Claude/Codex/Gemini labels, optional per-agent channels, and installers for all three agents. | 2026-05-25 |
+| `repo-feature-implementation` | Assessed Codex compatibility for the existing Slack/Zellij hook bridge. | 2026-05-25 |
 | `slackbot-claude` | Brainstormed, wrote design spec, wrote 15-task plan, implemented all tasks | 2026-05-24 |

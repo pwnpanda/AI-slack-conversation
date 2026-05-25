@@ -18,6 +18,8 @@ def test_upsert_session_inserts_when_missing(tmp_db_path: str) -> None:
         cwd="/home/r/p",
         zellij_session="default",
         zellij_pane_id="0",
+        agent="codex",
+        slack_channel="C-CODEX",
     )
     sess = reg.get_session("abc")
     assert sess is not None
@@ -25,6 +27,8 @@ def test_upsert_session_inserts_when_missing(tmp_db_path: str) -> None:
     assert sess.cwd == "/home/r/p"
     assert sess.zellij_session == "default"
     assert sess.zellij_pane_id == "0"
+    assert sess.agent == "codex"
+    assert sess.slack_channel == "C-CODEX"
     assert sess.name is None
     assert sess.status == "active"
     assert sess.slack_thread_ts is None
@@ -66,7 +70,9 @@ def test_claim_name_returns_prior_holder(tmp_db_path: str) -> None:
     assert new_sess.name == "shared"
     assert new_sess.slack_thread_ts == "111.222"
     # thread lookup now resolves to the new claimant
-    assert reg.get_session_by_thread("111.222").cc_session_id == "new"
+    thread_sess = reg.get_session_by_thread("111.222")
+    assert thread_sess is not None
+    assert thread_sess.cc_session_id == "new"
     reg.close()
 
 

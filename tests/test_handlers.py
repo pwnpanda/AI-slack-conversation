@@ -9,25 +9,34 @@ from slackbot.registry import Registry
 @dataclass
 class FakeSlackIO:
     top_level_posts: list[str] = field(default_factory=list)
+    top_level_channels: list[str | None] = field(default_factory=list)
     thread_posts: list[tuple[str, str]] = field(default_factory=list)
+    thread_channels: list[str | None] = field(default_factory=list)
     edits: list[tuple[str, str]] = field(default_factory=list)
+    edit_channels: list[str | None] = field(default_factory=list)
     reacts: list[tuple[str, str]] = field(default_factory=list)
     _ts_counter: int = 0
 
-    async def post_top_level(self, text: str) -> str:
+    def channel_for_agent(self, agent: str) -> str:
+        return f"C-{agent.upper()}"
+
+    async def post_top_level(self, text: str, channel: str | None = None) -> str:
         self.top_level_posts.append(text)
+        self.top_level_channels.append(channel)
         self._ts_counter += 1
         return f"top.{self._ts_counter}"
 
-    async def post_in_thread(self, thread_ts: str, text: str) -> str:
+    async def post_in_thread(self, thread_ts: str, text: str, channel: str | None = None) -> str:
         self.thread_posts.append((thread_ts, text))
+        self.thread_channels.append(channel)
         self._ts_counter += 1
         return f"thr.{self._ts_counter}"
 
-    async def edit_top_level(self, ts: str, text: str) -> None:
+    async def edit_top_level(self, ts: str, text: str, channel: str | None = None) -> None:
         self.edits.append((ts, text))
+        self.edit_channels.append(channel)
 
-    async def react(self, ts: str, emoji: str) -> None:
+    async def react(self, ts: str, emoji: str, channel: str | None = None) -> None:
         self.reacts.append((ts, emoji))
 
 
@@ -39,24 +48,64 @@ def reg(tmp_db_path: str):
     r.close()
 
 
-def _start(sid: str = "s1", cwd: str = "/x", pane: str = "0") -> dict:
+def _start(sid: str = "s1", cwd: str = "/x", pane: str = "0", agent: str = "claude") -> dict:
     return {
         "kind": "start",
         "session_id": sid,
         "cwd": cwd,
         "zellij_session": "main",
         "zellij_pane_id": pane,
+        "agent": agent,
         "resumed": False,
     }
 
 
 @pytest.mark.asyncio
-async def test_start_event_inserts_no_post_without_name(reg: Registry) -> None:
+async def test_claude_start_inserts_no_post_without_name(reg: Registry) -> None:
     slack = FakeSlackIO()
     h = EventHandlers(reg, slack)
-    await h.handle(_start())
+    await h.handle(_start(agent="claude"))
     assert slack.top_level_posts == []
+    sess = reg.get_session("s1")
+    assert sess is not None
+    assert sess.agent == "claude"
+    assert sess.name is None
+    assert sess.slack_channel == "C-CLAUDE"
     assert reg.get_session("s1") is not None
+
+
+@pytest.mark.asyncio
+async def test_codex_start_auto_registers_without_rn_command(reg: Registry) -> None:
+    slack = FakeSlackIO()
+    h = EventHandlers(reg, slack)
+    await h.handle(
+        _start(
+            sid="abcdef123456",
+            cwd="/home/r/claude-slack-bot",
+            agent="codex",
+        )
+    )
+
+    sess = reg.get_session("abcdef123456")
+    assert sess is not None
+    assert sess.name == "codex-claude-slack-bot-abcdef12"
+    assert sess.slack_thread_ts == "top.1"
+    assert slack.top_level_posts == [
+        "🟢 [Codex] codex-claude-slack-bot-abcdef12  ·  /home/r/claude-slack-bot"
+    ]
+    assert slack.top_level_channels == ["C-CODEX"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_start_auto_registers_without_rn_command(reg: Registry) -> None:
+    slack = FakeSlackIO()
+    h = EventHandlers(reg, slack)
+    await h.handle(_start(sid="1234567890", cwd="/tmp/with space", agent="gemini"))
+
+    sess = reg.get_session("1234567890")
+    assert sess is not None
+    assert sess.name == "gemini-with-space-12345678"
+    assert slack.top_level_posts == ["🟢 [Gemini] gemini-with-space-12345678  ·  /tmp/with space"]
 
 
 @pytest.mark.asyncio
@@ -80,9 +129,11 @@ async def test_name_event_posts_top_level_and_drains_buffer(reg: Registry) -> No
     await h.handle({"kind": "name", "session_id": "s1", "name": "myproj"})
 
     assert len(slack.top_level_posts) == 1
-    assert slack.top_level_posts[0] == "🟢 myproj  ·  /x"
+    assert slack.top_level_posts[0] == "🟢 [Claude] myproj  ·  /x"
+    assert slack.top_level_channels[0] == "C-CLAUDE"
     assert len(slack.thread_posts) == 1
-    assert slack.thread_posts[0][1] == "👤 before-name"
+    assert slack.thread_posts[0][1] == "[Claude] 👤 before-name"
+    assert slack.thread_channels[0] == "C-CLAUDE"
     assert reg.drain_unposted("s1") == []
 
 
@@ -94,7 +145,7 @@ async def test_prompt_after_name_posts_directly(reg: Registry) -> None:
     await h.handle({"kind": "name", "session_id": "s1", "name": "myproj"})
     await h.handle({"kind": "prompt", "session_id": "s1", "text": "live"})
     assert len(slack.thread_posts) == 1
-    assert slack.thread_posts[0][1] == "👤 live"
+    assert slack.thread_posts[0][1] == "[Claude] 👤 live"
 
 
 @pytest.mark.asyncio
@@ -105,7 +156,7 @@ async def test_rename_edits_top_level(reg: Registry) -> None:
     await h.handle({"kind": "name", "session_id": "s1", "name": "old"})
     await h.handle({"kind": "name", "session_id": "s1", "name": "new"})
     assert len(slack.top_level_posts) == 1
-    assert slack.edits[-1][1] == "🟢 new  ·  /x"
+    assert slack.edits[-1][1] == "🟢 [Claude] new  ·  /x"
 
 
 @pytest.mark.asyncio
@@ -115,7 +166,7 @@ async def test_end_event_edits_to_ended(reg: Registry) -> None:
     await h.handle(_start())
     await h.handle({"kind": "name", "session_id": "s1", "name": "myproj"})
     await h.handle({"kind": "end", "session_id": "s1", "reason": "done"})
-    assert slack.edits[-1][1] == "⚪ myproj  ·  /x  (ended)"
+    assert slack.edits[-1][1] == "⚪ [Claude] myproj  ·  /x  (ended)"
     sess = reg.get_session("s1")
     assert sess is not None and sess.status == "ended"
 
@@ -145,4 +196,4 @@ async def test_resumed_start_flips_back_to_active(reg: Registry) -> None:
     resumed = _start(pane="2")
     resumed["resumed"] = True
     await h.handle(resumed)
-    assert slack.edits[-1][1] == "🟢 myproj  ·  /x"
+    assert slack.edits[-1][1] == "🟢 [Claude] myproj  ·  /x"

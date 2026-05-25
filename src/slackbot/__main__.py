@@ -37,7 +37,7 @@ async def amain() -> None:
     reg.open()
 
     web_client = AsyncWebClient(token=cfg.slack_bot_token)
-    slack_io = SlackIO(web_client, cfg.slack_channel_id)
+    slack_io = SlackIO(web_client, cfg.slack_channel_id, cfg.agent_channels)
     dedupe = DeliveryDedupe()
     handlers = EventHandlers(reg, slack_io, dedupe=dedupe)
     actuator = ZellijActuator()
@@ -54,7 +54,8 @@ async def amain() -> None:
             return
         text = event.get("text", "")
         msg_ts = event.get("ts", "")
-        await router.on_reply(thread_ts=thread_ts, text=text, msg_ts=msg_ts)
+        channel = event.get("channel", "")
+        await router.on_reply(channel=channel, thread_ts=thread_ts, text=text, msg_ts=msg_ts)
 
     socket_handler = AsyncSocketModeHandler(bolt, cfg.slack_app_token)
     http_app = make_app(handlers)

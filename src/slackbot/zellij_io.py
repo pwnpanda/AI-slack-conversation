@@ -25,8 +25,11 @@ class ZellijActuator:
             subprocess.run, cmd, capture_output=True, text=True, check=False
         )
         if result.returncode != 0:
-            stderr = result.stderr.strip()
-            # zellij exits non-zero with "already focused" — that's the desired
+            stderr = result.stderr
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            stderr = stderr.strip()
+            # zellij exits non-zero with "already focused" - that's the desired
             # state for us, not a failure.
             if allow_already and "already focused" in stderr:
                 log.debug("zellij focus no-op (pane already focused): %s", " ".join(args))
