@@ -7,6 +7,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from slackbot.dedupe import DeliveryDedupe
 from slackbot.events import format_event, top_level_text
 from slackbot.registry import Registry, Session
 
@@ -21,9 +22,15 @@ class _SlackIOProto(Protocol):
 
 
 class EventHandlers:
-    def __init__(self, reg: Registry, slack: _SlackIOProto) -> None:
+    def __init__(
+        self,
+        reg: Registry,
+        slack: _SlackIOProto,
+        dedupe: DeliveryDedupe | None = None,
+    ) -> None:
         self._reg = reg
         self._slack = slack
+        self._dedupe = dedupe
 
     async def handle(self, event: dict[str, Any]) -> None:
         kind = event.get("kind", "")
@@ -82,7 +89,12 @@ class EventHandlers:
                 )
 
     async def _on_prompt(self, ev: dict[str, Any]) -> None:
-        await self._post_or_buffer(ev["session_id"], "prompt", {"text": ev.get("text", "")})
+        sid = ev["session_id"]
+        text = ev.get("text", "")
+        if self._dedupe and self._dedupe.consume(sid, text):
+            log.debug("prompt suppressed (originated from Slack delivery): %r", text)
+            return
+        await self._post_or_buffer(sid, "prompt", {"text": text})
 
     async def _on_response(self, ev: dict[str, Any]) -> None:
         data = {"text": ev.get("text", ""), "tool_summary": ev.get("tool_summary")}

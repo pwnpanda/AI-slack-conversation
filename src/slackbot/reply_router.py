@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
+from slackbot.dedupe import DeliveryDedupe
 from slackbot.registry import Registry
 from slackbot.zellij_io import ZellijError
 
@@ -21,10 +22,17 @@ class _SlackIOProto(Protocol):
 
 
 class ReplyRouter:
-    def __init__(self, reg: Registry, actuator: _ActuatorProto, slack: _SlackIOProto) -> None:
+    def __init__(
+        self,
+        reg: Registry,
+        actuator: _ActuatorProto,
+        slack: _SlackIOProto,
+        dedupe: DeliveryDedupe | None = None,
+    ) -> None:
         self._reg = reg
         self._actuator = actuator
         self._slack = slack
+        self._dedupe = dedupe
 
     async def on_reply(self, thread_ts: str, text: str, msg_ts: str) -> None:
         sess = self._reg.get_session_by_thread(thread_ts)
@@ -51,4 +59,8 @@ class ReplyRouter:
             await self._slack.react(msg_ts, "warning")
             return
 
+        # Suppress the echo: the UserPromptSubmit hook will fire with this text
+        # once CC accepts the prompt. We tell handlers to skip mirroring it.
+        if self._dedupe:
+            self._dedupe.mark(sess.cc_session_id, text)
         await self._slack.react(msg_ts, "white_check_mark")

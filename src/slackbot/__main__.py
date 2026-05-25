@@ -12,6 +12,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from slackbot.config import load_config
+from slackbot.dedupe import DeliveryDedupe
 from slackbot.handlers import EventHandlers
 from slackbot.logging_setup import configure as configure_logging
 from slackbot.registry import Registry
@@ -37,9 +38,10 @@ async def amain() -> None:
 
     web_client = AsyncWebClient(token=cfg.slack_bot_token)
     slack_io = SlackIO(web_client, cfg.slack_channel_id)
-    handlers = EventHandlers(reg, slack_io)
+    dedupe = DeliveryDedupe()
+    handlers = EventHandlers(reg, slack_io, dedupe=dedupe)
     actuator = ZellijActuator()
-    router = ReplyRouter(reg, actuator, slack_io)
+    router = ReplyRouter(reg, actuator, slack_io, dedupe=dedupe)
 
     bolt = AsyncApp(token=cfg.slack_bot_token, client=web_client)
 
