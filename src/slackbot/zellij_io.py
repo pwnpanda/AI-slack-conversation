@@ -15,17 +15,21 @@ class ZellijError(RuntimeError):
 
 class ZellijActuator:
     async def deliver(self, session: str, pane_id: str, text: str) -> None:
-        await self._zellij(session, "action", "focus-pane-id", pane_id)
+        await self._zellij(session, "action", "focus-pane-id", pane_id, allow_already=True)
         await self._zellij(session, "action", "write-chars", text)
         await self._zellij(session, "action", "write", "13")
 
-    async def _zellij(self, session: str, *args: str) -> None:
+    async def _zellij(self, session: str, *args: str, allow_already: bool = False) -> None:
         cmd = ["zellij", "--session", session, *args]
         result = await asyncio.to_thread(
             subprocess.run, cmd, capture_output=True, text=True, check=False
         )
         if result.returncode != 0:
-            raise ZellijError(
-                f"zellij {' '.join(args)} -> {result.returncode}: {result.stderr.strip()}"
-            )
+            stderr = result.stderr.strip()
+            # zellij exits non-zero with "already focused" — that's the desired
+            # state for us, not a failure.
+            if allow_already and "already focused" in stderr:
+                log.debug("zellij focus no-op (pane already focused): %s", " ".join(args))
+                return
+            raise ZellijError(f"zellij {' '.join(args)} -> {result.returncode}: {stderr}")
         log.debug("zellij ok: %s", " ".join(args))

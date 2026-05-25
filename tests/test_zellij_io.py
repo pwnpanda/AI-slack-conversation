@@ -51,3 +51,30 @@ async def test_deliver_raises_on_nonzero_exit(
     act = ZellijActuator()
     with pytest.raises(ZellijError):
         await act.deliver(session="main", pane_id="0", text="hi")
+
+
+@pytest.mark.asyncio
+async def test_deliver_tolerates_already_focused_on_focus_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_file = tmp_path / "calls.log"
+    script = bin_dir / "zellij"
+    script.write_text(
+        f"""#!/usr/bin/env bash
+echo "$@" >> {log_file}
+if [[ "$*" == *"focus-pane-id"* ]]; then
+  echo "Pane Terminal(0) is already focused" >&2
+  exit 2
+fi
+exit 0
+"""
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    act = ZellijActuator()
+    await act.deliver(session="main", pane_id="0", text="hi")
+    calls = log_file.read_text().splitlines()
+    assert len(calls) == 3  # focus tolerated, then write-chars + Enter
