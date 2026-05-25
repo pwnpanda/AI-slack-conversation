@@ -4,6 +4,7 @@ PORT="${SLACKBOT_PORT:-8787}"
 agent="${SLACKBOT_AGENT:-claude}"
 input="$(cat || true)"
 sid="$(printf '%s' "$input" | jq -r '.session_id // env.GEMINI_SESSION_ID // empty' 2>/dev/null || true)"
+printf "DEBUG: agent=%s sid=%s\n" "$agent" "$sid" >> /tmp/slackbot-hooks.log
 prompt="$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null || true)"
 if [ -z "$sid" ]; then
   printf '{}\n'
@@ -24,11 +25,11 @@ name="$(printf '%s' "$prompt" \
 if [ -n "$name" ]; then
   name_payload="$(jq -n --arg sid "$sid" --arg agent "$agent" --arg n "$name" \
     '{v:1,kind:"name",session_id:$sid,agent:$agent,name:$n}')"
-  if [ "$agent" = "codex" ]; then
+  if [ "$agent" = "codex" ] || [ "$agent" = "gemini" ]; then
     if post "$name_payload"; then
       reason="Renamed Slack thread to $name"
     else
-      reason="Slackbot unavailable; rename command not sent to Codex"
+      reason="Slackbot unavailable; rename command not sent to $agent"
     fi
     printf '{}\n'
     printf '%s\n' "$reason" >&2

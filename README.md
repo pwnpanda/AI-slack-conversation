@@ -165,6 +165,9 @@ journalctl --user -u claude-slack-bot -f
 
 | Session | Summary | Date |
 |---------|---------|------|
+| `debug-gemini-routing` | Fixed `rn` blocking for Gemini and verified Slack reply routing via trace logs. | 2026-05-25 |
+| `fix-rn-blocking` | Fixed `rn` command not blocking for Gemini; added debug logging to reply router. | 2026-05-25 |
+| `run-testing` | Ran full test suite to verify project health; all 57 tests passed. | 2026-05-25 |
 | `test-conversation` | Confirmed the Codex session wiring and explained the rename hook block message. | 2026-05-25 |
 | `codex-auto-register` | Added Codex/Gemini auto-registration and a portable `rn name` rename prompt. | 2026-05-25 |
 | `agent-prefix-routing` | Added Claude/Codex/Gemini labels, optional per-agent channels, and installers for all three agents. | 2026-05-25 |

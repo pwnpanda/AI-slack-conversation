@@ -4,6 +4,7 @@ PORT="${SLACKBOT_PORT:-8787}"
 agent="${SLACKBOT_AGENT:-claude}"
 input="$(cat || true)"
 sid="$(printf '%s' "$input" | jq -r '.session_id // env.GEMINI_SESSION_ID // empty' 2>/dev/null || true)"
+printf "DEBUG: agent=%s sid=%s\n" "$agent" "$sid" >> /tmp/slackbot-hooks.log
 cwd="$(printf '%s' "$input" | jq -r '.cwd // env.GEMINI_CWD // empty' 2>/dev/null || true)"
 if [ -z "$sid" ]; then
   printf '{}\n'
