@@ -15,7 +15,7 @@ class ZellijError(RuntimeError):
 
 class ZellijActuator:
     async def deliver(self, session: str, pane_id: str, text: str) -> None:
-        await self._zellij(session, "action", "focus-pane-with-id", pane_id)
+        await self._zellij(session, "action", "focus-pane-id", pane_id)
         await self._zellij(session, "action", "write-chars", text)
         await self._zellij(session, "action", "write", "13")
 

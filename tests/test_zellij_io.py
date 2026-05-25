@@ -34,7 +34,7 @@ async def test_deliver_calls_focus_then_write_then_enter(
 
     calls = log_file.read_text().splitlines()
     assert len(calls) == 3
-    assert "--session main action focus-pane-with-id 0" in calls[0]
+    assert "--session main action focus-pane-id 0" in calls[0]
     assert "--session main action write-chars hello world" in calls[1]
     assert "--session main action write 13" in calls[2]
 
