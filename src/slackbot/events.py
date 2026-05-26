@@ -43,7 +43,22 @@ def format_event(kind: str, data: dict[str, Any]) -> str:
             body += f"\n_↳ {summary}_"
         return body
     if kind == "notification":
-        return f"{prefix}⏸ {data.get('message', '')}"
+        msg = str(data.get("message", "")) or "waiting for input"
+        parts = [f"{prefix}⏸ {msg}"]
+        tool_request = str(data.get("tool_request", "")).strip()
+        if tool_request:
+            # Truncate very long tool_request JSON so Slack stays readable.
+            tr = tool_request if len(tool_request) <= 400 else tool_request[:400] + "…"
+            parts.append(f"_Asking permission for:_ `{tr}`")
+            parts.append("_Reply `1` to approve, `2` to deny, `3` to allow for session._")
+        ctx = str(data.get("context", "")).strip()
+        if ctx:
+            # Show the tail so the question itself is visible without flooding the channel.
+            tail = "\n".join(ctx.splitlines()[-6:])
+            if tail:
+                tail_trunc = tail if len(tail) <= _TRUNCATE_AT else tail[:_TRUNCATE_AT] + "\n…"
+                parts.append(f"```\n{tail_trunc}\n```")
+        return "\n".join(parts)
     if kind == "error":
         return f"{prefix}❌ {data.get('text', '')}"
     return f"{prefix}[{kind}] {data!r}"

@@ -38,10 +38,54 @@ def test_format_response_no_summary() -> None:
     assert "[Codex] 🤖 ok" in out
 
 
-def test_format_notification() -> None:
+def test_format_notification_bare() -> None:
     assert format_event("notification", {"message": "approve?", "agent": "gemini"}) == (
         "[Gemini] ⏸ approve?"
     )
+
+
+def test_format_notification_empty_message_falls_back() -> None:
+    out = format_event("notification", {"agent": "claude"})
+    assert out == "[Claude] ⏸ waiting for input"
+
+
+def test_format_notification_with_tool_request_adds_hint() -> None:
+    out = format_event(
+        "notification",
+        {
+            "message": "Claude needs your permission",
+            "agent": "claude",
+            "tool_request": 'Bash({"cmd":"rm file"})',
+        },
+    )
+    assert "⏸ Claude needs your permission" in out
+    assert "Asking permission for:" in out
+    assert "Bash({" in out
+    assert "Reply `1`" in out
+
+
+def test_format_notification_includes_context_tail() -> None:
+    out = format_event(
+        "notification",
+        {
+            "message": "needs input",
+            "agent": "claude",
+            "tool_request": "X(1)",
+            "context": "line1\nline2\nline3\nline4\nline5\nline6\nline7",
+        },
+    )
+    # Tail keeps last ~6 lines
+    assert "line7" in out
+    assert "line1" not in out  # would be 7 lines back
+
+
+def test_format_notification_no_tool_request_no_hint() -> None:
+    out = format_event(
+        "notification",
+        {"message": "idle now", "agent": "claude"},
+    )
+    assert "Reply `1`" not in out
+    assert "Asking permission" not in out
 
 
 def test_format_error() -> None:
