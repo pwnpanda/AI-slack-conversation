@@ -152,6 +152,23 @@ class Registry:
         )
         return _row_to_session(row) if row else None
 
+    def list_active_with_transcript(self) -> list[Session]:
+        """Return active sessions whose transcript_path is recorded.
+
+        Used at daemon startup to re-attach transcript readers for CCs that
+        were already running when the daemon last shut down.
+        """
+        rows = (
+            self._c()
+            .execute(
+                "SELECT * FROM sessions "
+                "WHERE status='active' AND transcript_path IS NOT NULL "
+                "ORDER BY last_event_at DESC"
+            )
+            .fetchall()
+        )
+        return [_row_to_session(r) for r in rows]
+
     def get_session_by_thread(self, thread_ts: str, channel: str | None = None) -> Session | None:
         if channel:
             row = (

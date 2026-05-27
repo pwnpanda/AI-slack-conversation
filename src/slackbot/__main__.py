@@ -132,6 +132,18 @@ async def amain() -> None:
     await http_site.start()
     log.info("http event endpoint listening on 127.0.0.1:%d", cfg.port)
 
+    # Re-attach transcript readers for sessions that the previous daemon instance
+    # was already watching. Without this, a daemon restart would leave existing CC
+    # sessions un-mirrored until they fire SessionStart again (which only happens
+    # when CC itself restarts).
+    rows = reg.list_active_with_transcript()
+    for row in rows:
+        if row.transcript_path:
+            supervisor.attach_reader(row.cc_session_id, row.transcript_path)
+            await supervisor.get_or_create(row.cc_session_id)
+    if rows:
+        log.info("re-attached %d transcript readers on startup", len(rows))
+
     sd_notify.ready()
 
     stop_event = asyncio.Event()
