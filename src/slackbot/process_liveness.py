@@ -49,16 +49,27 @@ def pid_is_alive(pid: int | None) -> bool:
     return True
 
 
-def session_is_alive(cc_session_id: str | None, cc_pid: int | None) -> bool:
-    """Return True if a CC process for `cc_session_id` is running.
+def session_is_alive(
+    cc_session_id: str | None,
+    cc_pid: int | None,
+    name: str | None = None,
+) -> bool:
+    """Return True if a CC process for this session is running.
 
-    Stable across CC restarts that reuse the session id (the common
-    auto-resume pattern). Falls back to pid only when session_id isn't found
-    in any cmdline, and returns True when we have no info at all so legacy
-    rows continue to deliver.
+    Looks for, in order:
+      1. The session_id UUID in any /proc/*/cmdline. Hits when CC is resumed by
+         id, e.g. `claude --resume f6b233bc-...`.
+      2. `--resume <name>` in any cmdline. Hits when the user resumes by their
+         registered short name via tooling like claude-auto-resume, which is
+         the user's actual day-to-day pattern.
+      3. The recorded cc_pid via os.kill(pid, 0) — only useful for fresh
+         sessions that were never resumed.
+    Returns True with no info at all so legacy rows still deliver.
     """
     if cc_session_id and _has_process_with_cmdline_containing(cc_session_id):
         return True
+    if name and _has_process_with_cmdline_containing(f"--resume {name}"):
+        return True
     if cc_pid is not None and cc_pid > 0:
         return pid_is_alive(cc_pid)
-    return True  # no evidence either way — assume alive
+    return True

@@ -104,7 +104,7 @@ async def test_reply_to_truly_dead_session_warns_and_marks_ended(reg: Registry) 
     reg.set_thread_ts("s1", "TOP.1")
     actuator = FakeActuator()
     slack = FakeSlackIO()
-    router = ReplyRouter(reg, actuator, slack, alive_fn=lambda _sid, _pid: False)
+    router = ReplyRouter(reg, actuator, slack, alive_fn=lambda _sid, _pid, _name: False)
     await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
     assert actuator.deliveries == []
     assert any("No running CC process" in t for _, t in slack.thread_posts)
@@ -124,7 +124,7 @@ async def test_reply_when_session_id_in_cmdline_delivers(reg: Registry) -> None:
     actuator = FakeActuator()
     slack = FakeSlackIO()
     # alive_fn says alive because session_id was found in cmdline.
-    router = ReplyRouter(reg, actuator, slack, alive_fn=lambda _sid, _pid: True)
+    router = ReplyRouter(reg, actuator, slack, alive_fn=lambda _sid, _pid, _name: True)
     await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
     assert actuator.deliveries == [("main", "3", "x")]
 
@@ -141,6 +141,23 @@ async def test_reply_to_idle_session_still_delivers(reg: Registry) -> None:
     )
     actuator = FakeActuator()
     slack = FakeSlackIO()
-    router = ReplyRouter(reg, actuator, slack, alive_fn=lambda _sid, _pid: True)
+    router = ReplyRouter(reg, actuator, slack, alive_fn=lambda _sid, _pid, _name: True)
     await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
     assert actuator.deliveries == [("main", "3", "x")]
+
+
+@pytest.mark.asyncio
+async def test_alive_check_receives_session_name(reg: Registry) -> None:
+    """name must be passed to the alive_fn so it can grep for `--resume <name>`."""
+    reg.upsert_session("s1", "/x", "main", "3")
+    reg.set_name("s1", "babydev")
+    reg.set_thread_ts("s1", "TOP.1")
+    seen: list[tuple] = []
+
+    def spy(sid, pid, name):
+        seen.append((sid, pid, name))
+        return True
+
+    router = ReplyRouter(reg, FakeActuator(), FakeSlackIO(), alive_fn=spy)
+    await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
+    assert seen == [("s1", None, "babydev")]

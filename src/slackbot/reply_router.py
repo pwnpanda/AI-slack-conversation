@@ -58,7 +58,7 @@ class ReplyRouter:
         # Liveness via /proc cmdline lookup of the session id. This is stable
         # across CC restarts that reuse the session id (claude-auto-resume),
         # which the older pid-only check kept misclassifying as dead.
-        if not self._alive(sess.cc_session_id, sess.cc_pid):
+        if not self._alive(sess.cc_session_id, sess.cc_pid, sess.name):
             self._reg.set_status(sess.cc_session_id, "ended")
             await self._slack.post_in_thread(
                 thread_ts,
