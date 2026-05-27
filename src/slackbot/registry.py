@@ -302,8 +302,13 @@ class Registry:
         was restarted (pane id reassigned) and where legacy rows never got cc_pid.
         Skips any field whose new value is empty so we don't clobber a known good
         value with NULL from a hook that didn't carry that field.
+
+        Also flips status back to 'active' — an arriving event from CC IS proof
+        of life. Without this, a row marked 'ended' (e.g. by a false-positive
+        pid check during a CC restart) stays rejected forever even though the
+        process is healthy again.
         """
-        sets: list[str] = ["last_event_at = ?"]
+        sets: list[str] = ["last_event_at = ?", "status = 'active'"]
         params: list[object] = [int(time.time())]
         if zellij_session:
             sets.append("zellij_session = ?")

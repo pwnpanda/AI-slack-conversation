@@ -122,3 +122,19 @@ def test_buffer_event_preserves_order(tmp_db_path: str) -> None:
     events = reg.drain_unposted("abc")
     assert [e.payload for e in events] == [f'{{"i":{i}}}' for i in range(5)]
     reg.close()
+
+
+def test_refresh_liveness_flips_ended_back_to_active(tmp_db_path: str) -> None:
+    """A fresh event from a previously-marked-dead row revives it."""
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("s1", "/x", "main", "3", cc_pid=100)
+    reg.set_status("s1", "ended")
+    assert reg.get_session("s1").status == "ended"
+    reg.refresh_liveness("s1", "main", "5", 200)
+    sess = reg.get_session("s1")
+    assert sess is not None
+    assert sess.status == "active"
+    assert sess.cc_pid == 200
+    assert sess.zellij_pane_id == "5"
+    reg.close()
