@@ -1,16 +1,14 @@
-"""Decide whether a Claude/Codex/Gemini CC session is still running.
+"""Liveness check for a CC session.
 
 A naive `os.kill(pid, 0)` is wrong here: tools like `claude-auto-resume.sh`
 restart the CC process under the SAME session id, so the pid recorded at the
 last hook fire is almost always *not* the pid that's running right now. We need
-an identifier stable across restarts — the session_id, which always appears in
-the resumed CC's command line (`claude --resume <session_id>`).
+an identifier stable across restarts — the session_id or the registered name.
 
-`session_is_alive` scans /proc for any process whose cmdline contains the
-session_id. Falls back to the recorded pid for the rare case where session_id
-isn't in cmdline (e.g. a fresh CC that hasn't been resumed). Returns True for
-unknown/legacy rows so we never refuse delivery without positive evidence of
-death.
+/proc/PID/cmdline stores argv NUL-separated. Substring matching is unreliable
+because (a) a NUL boundary breaks "--resume Finance" with a literal space, and
+(b) shell wrappers may contain that literal as a single-arg string. We split
+on NUL and match by exact argv tokens.
 """
 
 from __future__ import annotations
@@ -18,21 +16,44 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# Indirected so tests can substitute a tmp dir.
+_PROC = Path("/proc")
 
-def _has_process_with_cmdline_containing(needle: str) -> bool:
-    proc = Path("/proc")
-    if not needle or not proc.is_dir():
-        return False
-    needle_bytes = needle.encode("utf-8", errors="ignore")
-    for entry in proc.iterdir():
+
+def _iter_cmdlines() -> list[list[bytes]]:
+    """Return parsed argv for each running process under /proc."""
+    results: list[list[bytes]] = []
+    if not _PROC.is_dir():
+        return results
+    for entry in _PROC.iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            cmdline = (entry / "cmdline").read_bytes()
+            raw = (entry / "cmdline").read_bytes()
         except (FileNotFoundError, PermissionError, NotADirectoryError):
             continue
-        if needle_bytes in cmdline:
-            return True
+        if not raw:
+            continue
+        # cmdline is NUL-separated and NUL-terminated; split and drop trailing empty.
+        argv = raw.split(b"\x00")
+        if argv and argv[-1] == b"":
+            argv = argv[:-1]
+        results.append(argv)
+    return results
+
+
+def _argv_contains(token: str) -> bool:
+    needle = token.encode("utf-8", errors="ignore")
+    return any(needle in argv for argv in _iter_cmdlines())
+
+
+def _argv_pair_contains(first: str, second: str) -> bool:
+    first_b = first.encode("utf-8", errors="ignore")
+    second_b = second.encode("utf-8", errors="ignore")
+    for argv in _iter_cmdlines():
+        for i in range(len(argv) - 1):
+            if argv[i] == first_b and argv[i + 1] == second_b:
+                return True
     return False
 
 
@@ -46,29 +67,27 @@ def pid_is_alive(pid: int | None) -> bool:
         return False
     except PermissionError:
         return True
+    except OverflowError:
+        return False
     return True
 
 
 def session_is_alive(
     cc_session_id: str | None,
     cc_pid: int | None,
-    name: str | None = None,
+    name: str | None,
 ) -> bool:
     """Return True if a CC process for this session is running.
 
-    Looks for, in order:
-      1. The session_id UUID in any /proc/*/cmdline. Hits when CC is resumed by
-         id, e.g. `claude --resume f6b233bc-...`.
-      2. `--resume <name>` in any cmdline. Hits when the user resumes by their
-         registered short name via tooling like claude-auto-resume, which is
-         the user's actual day-to-day pattern.
-      3. The recorded cc_pid via os.kill(pid, 0) — only useful for fresh
-         sessions that were never resumed.
-    Returns True with no info at all so legacy rows still deliver.
+    Probes, in order:
+      1. session_id as a standalone argv token in any /proc/*/cmdline.
+      2. `--resume <name>` as adjacent argv tokens.
+      3. kill -0 on the recorded cc_pid (fresh, never-resumed sessions).
+    Returns True with no info, so legacy rows still deliver.
     """
-    if cc_session_id and _has_process_with_cmdline_containing(cc_session_id):
+    if cc_session_id and _argv_contains(cc_session_id):
         return True
-    if name and _has_process_with_cmdline_containing(f"--resume {name}"):
+    if name and _argv_pair_contains("--resume", name):
         return True
     if cc_pid is not None and cc_pid > 0:
         return pid_is_alive(cc_pid)
