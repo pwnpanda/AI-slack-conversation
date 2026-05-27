@@ -77,9 +77,7 @@ async def amain() -> None:
         reg, slack_io, dedupe=dedupe, stale_after_seconds=cfg.stale_after_seconds
     )
     actuator = ZellijActuator()
-    router = ReplyRouter(
-        reg, actuator, slack_io, dedupe=dedupe, stale_after_seconds=cfg.stale_after_seconds
-    )
+    router = ReplyRouter(reg, actuator, slack_io, dedupe=dedupe)
 
     bolt = AsyncApp(token=cfg.slack_bot_token, client=web_client)
 

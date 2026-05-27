@@ -15,6 +15,10 @@ source="$(printf '%s' "$input" | jq -r '.source // empty' 2>/dev/null || true)"
 case "${CLAUDE_HOOK_SOURCE:-}${source}" in
   resume|*resume*) resumed_flag=true ;;
 esac
+# $PPID is the parent process — the CC/Codex/Gemini process that invoked this hook.
+# We record it so the daemon can probe liveness with kill -0 instead of falling back
+# to coarse time-based "looks dead" heuristics.
+cc_pid="$PPID"
 payload="$(jq -n \
   --arg sid "$sid" \
   --arg agent "$agent" \
@@ -22,7 +26,9 @@ payload="$(jq -n \
   --arg zs "${ZELLIJ_SESSION_NAME:-}" \
   --arg zp "${ZELLIJ_PANE_ID:-}" \
   --argjson resumed "$resumed_flag" \
-  '{v:1,kind:"start",session_id:$sid,agent:$agent,cwd:$cwd,zellij_session:$zs,zellij_pane_id:$zp,resumed:$resumed}')"
+  --argjson cc_pid "$cc_pid" \
+  '{v:1,kind:"start",session_id:$sid,agent:$agent,cwd:$cwd,zellij_session:$zs,
+    zellij_pane_id:$zp,resumed:$resumed,cc_pid:$cc_pid}')"
 curl -fsS --max-time 1 -H 'content-type: application/json' \
   -d "$payload" "http://127.0.0.1:${PORT}/event" >/dev/null 2>&1 || true
 printf '{}\n'

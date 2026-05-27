@@ -97,36 +97,61 @@ async def test_reply_failure_posts_error_and_reacts_warn(reg: Registry) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reply_to_stale_active_session_warns_and_marks_ended(reg: Registry) -> None:
-    reg.upsert_session("s1", "/x", "main", "3")
+async def test_reply_to_dead_cc_pid_warns_and_marks_ended(reg: Registry) -> None:
+    """When the recorded CC PID is no longer running, refuse delivery."""
+    reg.upsert_session("s1", "/x", "main", "3", cc_pid=99999)
     reg.set_name("s1", "Finance")
     reg.set_thread_ts("s1", "TOP.1")
-    # Backdate last_event_at to 24h ago to simulate a dead session.
-    reg._c().execute(
-        "UPDATE sessions SET last_event_at = ? WHERE cc_session_id = ?",
-        (int(time.time()) - 86400, "s1"),
-    )
     actuator = FakeActuator()
     slack = FakeSlackIO()
-    router = ReplyRouter(reg, actuator, slack, stale_after_seconds=21600)
+
+    # Inject a pid_alive_fn that always returns False to simulate dead CC.
+    router = ReplyRouter(reg, actuator, slack, pid_alive_fn=lambda _: False)
     await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
-    assert actuator.deliveries == []  # not delivered
-    assert any("looks dead" in t for _, t in slack.thread_posts)
-    assert any("/rn Finance" in t for _, t in slack.thread_posts)
+
+    assert actuator.deliveries == []
+    assert any("no longer running" in t for _, t in slack.thread_posts)
+    assert any("auto-rebind" in t for _, t in slack.thread_posts)
     assert ("MSG.1", "no_entry_sign") in slack.reacts
-    # And the session is now marked ended, so future replies short-circuit.
     sess = reg.get_session("s1")
     assert sess is not None and sess.status == "ended"
 
 
 @pytest.mark.asyncio
-async def test_reply_to_fresh_session_still_delivers(reg: Registry) -> None:
-    reg.upsert_session("s1", "/x", "main", "3")
+async def test_reply_to_idle_but_alive_session_still_delivers(reg: Registry) -> None:
+    """An alive CC that's been idle for hours/days must STILL receive replies."""
+    reg.upsert_session("s1", "/x", "main", "3", cc_pid=12345)
     reg.set_name("s1", "p")
     reg.set_thread_ts("s1", "TOP.1")
-    # last_event_at is "now" from upsert_session
+    # Backdate last_event_at to 48h ago. No time-based stale anymore — only
+    # process liveness matters.
+    reg._c().execute(
+        "UPDATE sessions SET last_event_at = ? WHERE cc_session_id = ?",
+        (int(time.time()) - 48 * 3600, "s1"),
+    )
     actuator = FakeActuator()
     slack = FakeSlackIO()
-    router = ReplyRouter(reg, actuator, slack, stale_after_seconds=21600)
+    router = ReplyRouter(reg, actuator, slack, pid_alive_fn=lambda _: True)
     await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
     assert actuator.deliveries == [("main", "3", "x")]
+
+
+@pytest.mark.asyncio
+async def test_reply_to_legacy_row_without_pid_still_delivers(reg: Registry) -> None:
+    """Rows that predate cc_pid have NULL pid — must not be treated as dead."""
+    reg.upsert_session("s1", "/x", "main", "3")  # no cc_pid
+    reg.set_name("s1", "p")
+    reg.set_thread_ts("s1", "TOP.1")
+    actuator = FakeActuator()
+    slack = FakeSlackIO()
+    # Even if pid_alive returned False, sess.cc_pid is None so we shouldn't call it.
+    sentinel_called = []
+
+    def boom(_pid):
+        sentinel_called.append(True)
+        return False
+
+    router = ReplyRouter(reg, actuator, slack, pid_alive_fn=boom)
+    await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
+    assert actuator.deliveries == [("main", "3", "x")]
+    assert sentinel_called == []  # short-circuit when cc_pid is None

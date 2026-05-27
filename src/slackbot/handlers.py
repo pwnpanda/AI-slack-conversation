@@ -58,6 +58,11 @@ class EventHandlers:
         channel = self._slack.channel_for_agent(agent)
         cwd = ev["cwd"]
         zellij_session = ev.get("zellij_session")
+        cc_pid_raw = ev.get("cc_pid")
+        try:
+            cc_pid: int | None = int(cc_pid_raw) if cc_pid_raw is not None else None
+        except (TypeError, ValueError):
+            cc_pid = None
         self._reg.upsert_session(
             sid,
             cwd,
@@ -65,6 +70,7 @@ class EventHandlers:
             ev.get("zellij_pane_id"),
             agent=agent,
             slack_channel=channel,
+            cc_pid=cc_pid,
         )
         if prior and prior.name and prior.slack_thread_ts:
             prior_channel = prior.slack_channel

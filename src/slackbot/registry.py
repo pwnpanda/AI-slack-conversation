@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   zellij_pane_id  TEXT,
   slack_channel   TEXT,
   slack_thread_ts TEXT,
+  cc_pid          INTEGER,
   created_at      INTEGER NOT NULL,
   last_event_at   INTEGER NOT NULL,
   status          TEXT NOT NULL
@@ -47,6 +48,7 @@ class Session:
     zellij_pane_id: str | None
     slack_channel: str | None
     slack_thread_ts: str | None
+    cc_pid: int | None
     created_at: int
     last_event_at: int
     status: str
@@ -82,6 +84,8 @@ class Registry:
             self._c().execute(
                 "ALTER TABLE sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'"
             )
+        if "cc_pid" not in columns:
+            self._c().execute("ALTER TABLE sessions ADD COLUMN cc_pid INTEGER")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -101,23 +105,35 @@ class Registry:
         zellij_pane_id: str | None,
         agent: str = "claude",
         slack_channel: str | None = None,
+        cc_pid: int | None = None,
     ) -> None:
         now = int(time.time())
         self._c().execute(
             """
             INSERT INTO sessions (cc_session_id, agent, cwd, zellij_session, zellij_pane_id,
-                                  slack_channel, created_at, last_event_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                                  slack_channel, cc_pid, created_at, last_event_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
             ON CONFLICT(cc_session_id) DO UPDATE SET
               agent = excluded.agent,
               cwd = excluded.cwd,
               zellij_session = excluded.zellij_session,
               zellij_pane_id = excluded.zellij_pane_id,
               slack_channel = excluded.slack_channel,
+              cc_pid = COALESCE(excluded.cc_pid, sessions.cc_pid),
               last_event_at = excluded.last_event_at,
               status = 'active'
             """,
-            (cc_session_id, agent, cwd, zellij_session, zellij_pane_id, slack_channel, now, now),
+            (
+                cc_session_id,
+                agent,
+                cwd,
+                zellij_session,
+                zellij_pane_id,
+                slack_channel,
+                cc_pid,
+                now,
+                now,
+            ),
         )
 
     def get_session(self, cc_session_id: str) -> Session | None:
@@ -283,6 +299,7 @@ def _row_to_session(row: sqlite3.Row) -> Session:
         zellij_pane_id=row["zellij_pane_id"],
         slack_channel=row["slack_channel"],
         slack_thread_ts=row["slack_thread_ts"],
+        cc_pid=row["cc_pid"],
         created_at=row["created_at"],
         last_event_at=row["last_event_at"],
         status=row["status"],
