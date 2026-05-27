@@ -1,61 +1,82 @@
-"""Daemon entry point. Runs aiohttp event server + Slack Socket Mode together."""
+"""Daemon entry point. Wires supervisor, transcript readers, watchdogs."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import signal
+from collections.abc import Callable
 
 from aiohttp import web
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
+from slackbot import sd_notify
 from slackbot.config import load_config
-from slackbot.dedupe import DeliveryDedupe
 from slackbot.handlers import EventHandlers
+from slackbot.liveness_cache import LivenessCache
 from slackbot.logging_setup import configure as configure_logging
+from slackbot.process_liveness import session_is_alive
 from slackbot.registry import Registry
 from slackbot.reply_router import ReplyRouter
 from slackbot.server import make_app
 from slackbot.slack_io import SlackIO
+from slackbot.supervisor import Supervisor
 from slackbot.zellij_io import ZellijActuator
 
 log = logging.getLogger("slackbot.main")
 
+_READER_POLL_INTERVAL = 0.5
+_REAPER_INTERVAL = 30.0
+_INACTIVITY_RECONNECT = 90.0
+_WATCHDOG_INTERVAL = 60.0
 
-async def socket_health_watchdog(
-    socket_handler: AsyncSocketModeHandler, interval_seconds: int = 30
-) -> None:
-    """Detect silently-broken Socket Mode sessions and force a reconnect.
 
-    Slack rotates Socket Mode sessions every ~5h. After rotation the new session
-    occasionally stops delivering events without raising any error — Bolt stays
-    in a zombie state. `is_ping_pong_failing` is the SDK's native liveness probe;
-    we poll it and reconnect when it goes True.
-    """
+async def reader_pump(supervisor: Supervisor) -> None:
     while True:
         try:
-            await asyncio.sleep(interval_seconds)
-            client = socket_handler.client
-            if client is None or not await client.is_connected():
-                continue
-            if await client.is_ping_pong_failing():
-                log.warning("Socket Mode ping/pong failing — forcing reconnect.")
-                try:
-                    await client.disconnect()
-                except Exception:
-                    log.exception("disconnect() raised; continuing to reconnect")
-                await asyncio.sleep(1)
-                try:
-                    await client.connect()
-                    log.info("Socket Mode reconnected by watchdog.")
-                except Exception:
-                    log.exception("reconnect() failed; watchdog will retry on next tick")
-        except asyncio.CancelledError:
-            raise
+            await supervisor.pump_readers()
         except Exception:
-            log.exception("watchdog loop iteration failed; continuing")
+            log.exception("reader pump iteration failed")
+        await asyncio.sleep(_READER_POLL_INTERVAL)
+
+
+async def reaper(supervisor: Supervisor) -> None:
+    while True:
+        try:
+            await supervisor.reap_once()
+        except Exception:
+            log.exception("reaper iteration failed")
+        await asyncio.sleep(_REAPER_INTERVAL)
+
+
+async def watchdog_heartbeat() -> None:
+    while True:
+        await asyncio.sleep(_WATCHDOG_INTERVAL)
+        sd_notify.watchdog()
+
+
+async def socket_health_watchdog(
+    socket_handler: AsyncSocketModeHandler,
+    get_last_event: Callable[[], float],
+) -> None:
+    """Force a Socket Mode reconnect if no event has arrived in INACTIVITY threshold."""
+    loop = asyncio.get_running_loop()
+    while True:
+        await asyncio.sleep(30.0)
+        client = socket_handler.client
+        if client is None:
+            continue
+        now = loop.time()
+        if now - get_last_event() > _INACTIVITY_RECONNECT:
+            log.warning("no Slack events in %ss — forcing reconnect", _INACTIVITY_RECONNECT)
+            try:
+                await client.disconnect()
+                await asyncio.sleep(1)
+                await client.connect()
+            except Exception:
+                log.exception("watchdog reconnect failed")
 
 
 async def amain() -> None:
@@ -72,17 +93,20 @@ async def amain() -> None:
 
     web_client = AsyncWebClient(token=cfg.slack_bot_token)
     slack_io = SlackIO(web_client, cfg.slack_channel_id, cfg.agent_channels)
-    dedupe = DeliveryDedupe()
-    handlers = EventHandlers(
-        reg, slack_io, dedupe=dedupe, stale_after_seconds=cfg.stale_after_seconds
-    )
     actuator = ZellijActuator()
-    router = ReplyRouter(reg, actuator, slack_io, dedupe=dedupe)
+    supervisor = Supervisor(reg=reg, slack=slack_io, actuator=actuator)
+    liveness = LivenessCache(session_is_alive)
+    handlers = EventHandlers(reg, supervisor, slack_io)
+    router = ReplyRouter(reg=reg, supervisor=supervisor, liveness=liveness, slack=slack_io)
 
     bolt = AsyncApp(token=cfg.slack_bot_token, client=web_client)
+    loop = asyncio.get_running_loop()
+    last_event_at = [loop.time()]
 
     @bolt.event("message")
     async def on_message(event, logger):
+        last_event_at[0] = loop.time()
+        sd_notify.watchdog()
         if event.get("bot_id"):
             return
         thread_ts = event.get("thread_ts")
@@ -91,8 +115,6 @@ async def amain() -> None:
         text = event.get("text", "")
         msg_ts = event.get("ts", "")
         channel = event.get("channel", "")
-        # INFO-level so we can verify in journalctl that messages are arriving
-        # even when LOG_LEVEL=INFO (previously only visible at DEBUG).
         log.info(
             "thread reply received: channel=%s thread_ts=%s msg_ts=%s len=%d",
             channel,
@@ -110,20 +132,28 @@ async def amain() -> None:
     await http_site.start()
     log.info("http event endpoint listening on 127.0.0.1:%d", cfg.port)
 
+    sd_notify.ready()
+
     stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
-    socket_task = asyncio.create_task(socket_handler.start_async())
-    watchdog_task = asyncio.create_task(socket_health_watchdog(socket_handler))
+    tasks: list[asyncio.Task] = []
+    tasks.append(asyncio.create_task(socket_handler.start_async()))
+    tasks.append(asyncio.create_task(reader_pump(supervisor)))
+    tasks.append(asyncio.create_task(reaper(supervisor)))
+    tasks.append(asyncio.create_task(watchdog_heartbeat()))
+    tasks.append(
+        asyncio.create_task(socket_health_watchdog(socket_handler, lambda: last_event_at[0]))
+    )
 
     try:
         await stop_event.wait()
     finally:
         log.info("shutting down")
-        watchdog_task.cancel()
-        socket_task.cancel()
+        for t in tasks:
+            t.cancel()
+        await supervisor.shutdown()
         await http_runner.cleanup()
         reg.close()
 
