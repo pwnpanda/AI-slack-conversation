@@ -85,8 +85,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = "==3.11.10" },
-    { name = "slack-bolt", specifier = "==1.21.2" },
-    { name = "slack-sdk", specifier = "==3.33.4" },
+    { name = "slack-bolt", specifier = "==1.28.0" },
+    { name = "slack-sdk", specifier = "==3.42.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -339,23 +339,23 @@ wheels = [
 
 [[package]]
 name = "slack-bolt"
-version = "1.21.2"
+version = "1.28.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "slack-sdk" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/eb/1d/b4209957ee6d102e7d74b7e909e4d426d8ea53dcb85e9d9b77991ef161bd/slack_bolt-1.21.2.tar.gz", hash = "sha256:05ac2d454adfddfc629fb63c7a3723bd1432a24373119368bc81f2f52b029cbf", size = 129963, upload-time = "2024-10-25T05:42:20.72Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5c/97/a62dde97e84027b252807f2044bed2edcda2d063a5cb0c535fb2be8d9b5d/slack_bolt-1.28.0.tar.gz", hash = "sha256:bfe367d867e8fb157a057248ebd4ac2d7f43acac6d0700fa31381db1e10f3b0f", size = 130768, upload-time = "2026-04-06T23:24:59.936Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/b8/40a673356f7ea185aa02ed1aa5f8730aaba791031361fcba1afc977f27b7/slack_bolt-1.21.2-py2.py3-none-any.whl", hash = "sha256:6860fc8693ca543b653c5d49a09b8b542f5fb7a02638342a7ddd18d8bc6f3ba0", size = 229474, upload-time = "2024-10-25T05:42:19.027Z" },
+    { url = "https://files.pythonhosted.org/packages/81/a9/697b6a92c728f09d5ef6b8e83dc6c8a87bc6d59499b2933ed067f11b7e30/slack_bolt-1.28.0-py2.py3-none-any.whl", hash = "sha256:738d1ca5e7c7039b6e18103d29267ced6e18c2517053eff18991fdd593acce5c", size = 234819, upload-time = "2026-04-06T23:24:58.278Z" },
 ]
 
 [[package]]
 name = "slack-sdk"
-version = "3.33.4"
+version = "3.42.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e6/ee/f1bd8fde0097d74ddc08d186726da17a1f041021ed6f422a8ac94ffc8e84/slack_sdk-3.33.4.tar.gz", hash = "sha256:5e109847f6b6a22d227609226ba4ed936109dc00675bddeb7e0bee502d3ee7e0", size = 233093, upload-time = "2024-11-19T03:37:39.339Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0e/00/16258bfa547559b2c936b50c882b4f0a36ebf6b69639eb763d8fa5e8d6cb/slack_sdk-3.42.0.tar.gz", hash = "sha256:873db9e1f632ac650ffdbf9d8ba825f3e9e7e576a1e4f9604ccb2a15b3727e3d", size = 252136, upload-time = "2026-05-18T17:50:44.727Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8a/7d/23074983ffd0d2d01163b74c621d7ffa3ea21e938b6d6443659adb63bb73/slack_sdk-3.33.4-py2.py3-none-any.whl", hash = "sha256:9f30cb3c9c07b441c49d53fc27f9f1837ad1592a7e9d4ca431f53cdad8826cc6", size = 292095, upload-time = "2024-11-19T03:37:37.771Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/ef/8a1556bd4843443993fc116783790a7cc553601a37f7d965ec26eef95e76/slack_sdk-3.42.0-py2.py3-none-any.whl", hash = "sha256:eb39aff97e476e10cc5a8ac29bd2e79a9959e880d9fe0c03b4e8f05b2ac996ff", size = 315469, upload-time = "2026-05-18T17:50:41.972Z" },
 ]
 
 [[package]]

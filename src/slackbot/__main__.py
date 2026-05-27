@@ -24,6 +24,40 @@ from slackbot.zellij_io import ZellijActuator
 log = logging.getLogger("slackbot.main")
 
 
+async def socket_health_watchdog(
+    socket_handler: AsyncSocketModeHandler, interval_seconds: int = 30
+) -> None:
+    """Detect silently-broken Socket Mode sessions and force a reconnect.
+
+    Slack rotates Socket Mode sessions every ~5h. After rotation the new session
+    occasionally stops delivering events without raising any error — Bolt stays
+    in a zombie state. `is_ping_pong_failing` is the SDK's native liveness probe;
+    we poll it and reconnect when it goes True.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            client = socket_handler.client
+            if client is None or not client.is_connected():
+                continue
+            if await client.is_ping_pong_failing():
+                log.warning("Socket Mode ping/pong failing — forcing reconnect.")
+                try:
+                    await client.disconnect()
+                except Exception:
+                    log.exception("disconnect() raised; continuing to reconnect")
+                await asyncio.sleep(1)
+                try:
+                    await client.connect()
+                    log.info("Socket Mode reconnected by watchdog.")
+                except Exception:
+                    log.exception("reconnect() failed; watchdog will retry on next tick")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("watchdog loop iteration failed; continuing")
+
+
 async def amain() -> None:
     cfg = load_config()
     configure_logging(cfg.log_level)
@@ -57,6 +91,15 @@ async def amain() -> None:
         text = event.get("text", "")
         msg_ts = event.get("ts", "")
         channel = event.get("channel", "")
+        # INFO-level so we can verify in journalctl that messages are arriving
+        # even when LOG_LEVEL=INFO (previously only visible at DEBUG).
+        log.info(
+            "thread reply received: channel=%s thread_ts=%s msg_ts=%s len=%d",
+            channel,
+            thread_ts,
+            msg_ts,
+            len(text),
+        )
         await router.on_reply(channel=channel, thread_ts=thread_ts, text=text, msg_ts=msg_ts)
 
     socket_handler = AsyncSocketModeHandler(bolt, cfg.slack_app_token)
@@ -73,11 +116,13 @@ async def amain() -> None:
         loop.add_signal_handler(sig, stop_event.set)
 
     socket_task = asyncio.create_task(socket_handler.start_async())
+    watchdog_task = asyncio.create_task(socket_health_watchdog(socket_handler))
 
     try:
         await stop_event.wait()
     finally:
         log.info("shutting down")
+        watchdog_task.cancel()
         socket_task.cancel()
         await http_runner.cleanup()
         reg.close()
