@@ -124,8 +124,8 @@ def test_buffer_event_preserves_order(tmp_db_path: str) -> None:
     reg.close()
 
 
-def test_refresh_liveness_flips_ended_back_to_active(tmp_db_path: str) -> None:
-    """A fresh event from a previously-marked-dead row revives it."""
+def test_refresh_liveness_updates_fields_without_status_change(tmp_db_path: str) -> None:
+    """refresh_liveness updates pid/pane/timestamp but leaves status untouched."""
     reg = Registry(tmp_db_path)
     reg.open()
     reg.upsert_session("s1", "/x", "main", "3", cc_pid=100)
@@ -134,7 +134,54 @@ def test_refresh_liveness_flips_ended_back_to_active(tmp_db_path: str) -> None:
     reg.refresh_liveness("s1", "main", "5", 200)
     sess = reg.get_session("s1")
     assert sess is not None
-    assert sess.status == "active"
+    assert sess.status == "ended"  # NOT flipped back to active
     assert sess.cc_pid == 200
     assert sess.zellij_pane_id == "5"
+    reg.close()
+
+
+def test_upsert_session_persists_transcript_path(tmp_db_path: str) -> None:
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("s1", "/x", "main", "3", transcript_path="/tmp/tx.jsonl")
+    sess = reg.get_session("s1")
+    assert sess is not None
+    assert sess.transcript_path == "/tmp/tx.jsonl"
+    reg.close()
+
+
+def test_refresh_liveness_does_not_flip_status(tmp_db_path: str) -> None:
+    """status is diagnostic-only now; refresh must not touch it."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("s1", "/x", "main", "3", cc_pid=100)
+    reg.set_status("s1", "ended")
+    reg.refresh_liveness("s1", "main", "5", 200)
+    sess = reg.get_session("s1")
+    assert sess is not None
+    assert sess.status == "ended"  # NO LONGER flipped to active
+    assert sess.cc_pid == 200  # other fields still refreshed
+    reg.close()
+
+
+def test_claim_name_is_atomic(tmp_db_path: str) -> None:
+    """Two concurrent claims of the same name end with exactly one row owning it."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("a", "/x", "main", "1")
+    reg.upsert_session("b", "/x", "main", "2")
+    reg.claim_name("a", "shared")
+    reg.set_thread_ts("a", "T.1")
+    prior = reg.claim_name("b", "shared")
+    assert prior == "T.1"
+    a = reg.get_session("a")
+    b = reg.get_session("b")
+    assert a is not None and a.name is None and a.slack_thread_ts is None
+    assert b is not None and b.name == "shared" and b.slack_thread_ts == "T.1"
     reg.close()

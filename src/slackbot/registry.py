@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   slack_channel   TEXT,
   slack_thread_ts TEXT,
   cc_pid          INTEGER,
+  transcript_path TEXT,
   created_at      INTEGER NOT NULL,
   last_event_at   INTEGER NOT NULL,
   status          TEXT NOT NULL
@@ -49,6 +50,7 @@ class Session:
     slack_channel: str | None
     slack_thread_ts: str | None
     cc_pid: int | None
+    transcript_path: str | None
     created_at: int
     last_event_at: int
     status: str
@@ -86,6 +88,8 @@ class Registry:
             )
         if "cc_pid" not in columns:
             self._c().execute("ALTER TABLE sessions ADD COLUMN cc_pid INTEGER")
+        if "transcript_path" not in columns:
+            self._c().execute("ALTER TABLE sessions ADD COLUMN transcript_path TEXT")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -106,13 +110,15 @@ class Registry:
         agent: str = "claude",
         slack_channel: str | None = None,
         cc_pid: int | None = None,
+        transcript_path: str | None = None,
     ) -> None:
         now = int(time.time())
         self._c().execute(
             """
             INSERT INTO sessions (cc_session_id, agent, cwd, zellij_session, zellij_pane_id,
-                                  slack_channel, cc_pid, created_at, last_event_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                                  slack_channel, cc_pid, transcript_path,
+                                  created_at, last_event_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
             ON CONFLICT(cc_session_id) DO UPDATE SET
               agent = excluded.agent,
               cwd = excluded.cwd,
@@ -120,6 +126,7 @@ class Registry:
               zellij_pane_id = excluded.zellij_pane_id,
               slack_channel = excluded.slack_channel,
               cc_pid = COALESCE(excluded.cc_pid, sessions.cc_pid),
+              transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path),
               last_event_at = excluded.last_event_at,
               status = 'active'
             """,
@@ -131,6 +138,7 @@ class Registry:
                 zellij_pane_id,
                 slack_channel,
                 cc_pid,
+                transcript_path,
                 now,
                 now,
             ),
@@ -192,18 +200,9 @@ class Registry:
         cwd: str,
         agent: str,
         exclude_sid: str,
-        stale_after_seconds: int,
     ) -> Session | None:
-        """Find a named predecessor in the same (zellij_session, cwd, agent) workspace
-        that is safe to inherit a name+thread from.
-
-        Safety: only return a row whose CC process is no longer alive — either
-        status='ended' or last_event_at older than `stale_after_seconds`. This keeps
-        a still-running peer session in the same cwd from being silently hijacked.
-
-        Returns the most recently active matching row, or None.
-        """
-        cutoff = int(time.time()) - stale_after_seconds
+        """Find any named predecessor in the same workspace. The caller decides
+        whether the candidate is actually dead via session_is_alive."""
         row = (
             self._c()
             .execute(
@@ -214,44 +213,57 @@ class Registry:
                   AND zellij_session IS ?
                   AND agent = ?
                   AND cc_session_id != ?
-                  AND (status = 'ended' OR last_event_at < ?)
                 ORDER BY last_event_at DESC
                 LIMIT 1
                 """,
-                (cwd, zellij_session, agent, exclude_sid, cutoff),
+                (cwd, zellij_session, agent, exclude_sid),
             )
             .fetchone()
         )
         return _row_to_session(row) if row else None
 
     def claim_name(self, cc_session_id: str, name: str) -> str | None:
-        """Claim `name` for `cc_session_id`. Returns prior holder's thread_ts (or None)."""
-        current = self.get_session(cc_session_id)
-        current_channel = current.slack_channel if current else None
-        prior = (
-            self._c()
-            .execute(
+        """Claim `name` for `cc_session_id`. Returns prior holder's thread_ts (or None).
+
+        Wrapped in BEGIN IMMEDIATE/COMMIT so a concurrent claim cannot leave
+        two rows owning the same name.
+        """
+        conn = self._c()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = conn.execute(
+                "SELECT slack_channel FROM sessions WHERE cc_session_id = ?",
+                (cc_session_id,),
+            ).fetchone()
+            current_channel = current["slack_channel"] if current else None
+            prior = conn.execute(
                 "SELECT cc_session_id, slack_channel, slack_thread_ts FROM sessions "
                 "WHERE name = ? AND cc_session_id != ?",
                 (name, cc_session_id),
+            ).fetchone()
+            prior_thread: str | None = None
+            if prior and prior["slack_channel"] == current_channel:
+                prior_thread = prior["slack_thread_ts"]
+            if prior:
+                conn.execute(
+                    "UPDATE sessions SET name = NULL, slack_thread_ts = NULL "
+                    "WHERE cc_session_id = ?",
+                    (prior["cc_session_id"],),
+                )
+            conn.execute(
+                "UPDATE sessions SET name = ?, last_event_at = ? WHERE cc_session_id = ?",
+                (name, int(time.time()), cc_session_id),
             )
-            .fetchone()
-        )
-        prior_thread: str | None = None
-        if prior and prior["slack_channel"] == current_channel:
-            prior_thread = prior["slack_thread_ts"]
-        if prior:
-            self.clear_name(prior["cc_session_id"])
-            # Transfer thread ownership: clear from prior so get_session_by_thread
-            # routes future replies to the new claimant only.
-            self._c().execute(
-                "UPDATE sessions SET slack_thread_ts = NULL WHERE cc_session_id = ?",
-                (prior["cc_session_id"],),
-            )
-        self.set_name(cc_session_id, name)
-        if prior_thread:
-            self.set_thread_ts(cc_session_id, prior_thread)
-        return prior_thread
+            if prior_thread:
+                conn.execute(
+                    "UPDATE sessions SET slack_thread_ts = ? WHERE cc_session_id = ?",
+                    (prior_thread, cc_session_id),
+                )
+            conn.execute("COMMIT")
+            return prior_thread
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     def buffer_event(self, cc_session_id: str, kind: str, payload: str) -> int:
         cur = self._c().execute(
@@ -295,20 +307,9 @@ class Registry:
         zellij_pane_id: str | None,
         cc_pid: int | None,
     ) -> None:
-        """Update mutable runtime fields without touching name/thread state.
-
-        Called on every non-start event so that a long-running CC's pane id and
-        pid stay current — fixes the case where SessionStart fired before zellij
-        was restarted (pane id reassigned) and where legacy rows never got cc_pid.
-        Skips any field whose new value is empty so we don't clobber a known good
-        value with NULL from a hook that didn't carry that field.
-
-        Also flips status back to 'active' — an arriving event from CC IS proof
-        of life. Without this, a row marked 'ended' (e.g. by a false-positive
-        pid check during a CC restart) stays rejected forever even though the
-        process is healthy again.
-        """
-        sets: list[str] = ["last_event_at = ?", "status = 'active'"]
+        """Update mutable runtime fields. Does NOT touch status — that is now
+        diagnostic-only; the reply path uses session_is_alive directly."""
+        sets: list[str] = ["last_event_at = ?"]
         params: list[object] = [int(time.time())]
         if zellij_session:
             sets.append("zellij_session = ?")
@@ -337,6 +338,7 @@ def _row_to_session(row: sqlite3.Row) -> Session:
         slack_channel=row["slack_channel"],
         slack_thread_ts=row["slack_thread_ts"],
         cc_pid=row["cc_pid"],
+        transcript_path=row["transcript_path"],
         created_at=row["created_at"],
         last_event_at=row["last_event_at"],
         status=row["status"],

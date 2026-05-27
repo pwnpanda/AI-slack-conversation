@@ -104,9 +104,8 @@ class EventHandlers:
             cwd=cwd,
             agent=agent,
             exclude_sid=sid,
-            stale_after_seconds=self._stale_after,
         )
-        if recovered and recovered.name:
+        if recovered and recovered.name and recovered.status == "ended":
             log.info(
                 "auto-recovering name=%r from %s into new session %s (cwd=%s)",
                 recovered.name,
