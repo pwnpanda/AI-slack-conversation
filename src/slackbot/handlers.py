@@ -168,6 +168,21 @@ class EventHandlers:
             }
         )
 
+    async def _on_prompt(self, ev: dict[str, Any]) -> None:
+        # Legacy hook. Transcript reader is the real source for prompt mirroring.
+        # We still accept the event to refresh runtime fields (cc_pid, pane id).
+        self._refresh_runtime(ev["session_id"], ev)
+
+    async def _on_response(self, ev: dict[str, Any]) -> None:
+        # Same rationale as _on_prompt — transcript reader does the mirroring.
+        self._refresh_runtime(ev["session_id"], ev)
+
+    async def _on_error(self, ev: dict[str, Any]) -> None:
+        sid = ev["session_id"]
+        self._refresh_runtime(sid, ev)
+        worker = await self._sup.get_or_create(sid)
+        await worker.enqueue({"kind": "error", "text": ev.get("text", "")})
+
     def _refresh_runtime(self, sid: str, ev: dict[str, Any]) -> None:
         sess = self._reg.get_session(sid)
         if sess is None:

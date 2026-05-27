@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from collections.abc import Callable
 
 from aiohttp import web
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
@@ -29,8 +28,8 @@ log = logging.getLogger("slackbot.main")
 
 _READER_POLL_INTERVAL = 0.5
 _REAPER_INTERVAL = 30.0
-_INACTIVITY_RECONNECT = 90.0
 _WATCHDOG_INTERVAL = 60.0
+_PING_CHECK_INTERVAL = 60.0
 
 
 async def reader_pump(supervisor: Supervisor) -> None:
@@ -57,26 +56,29 @@ async def watchdog_heartbeat() -> None:
         sd_notify.watchdog()
 
 
-async def socket_health_watchdog(
-    socket_handler: AsyncSocketModeHandler,
-    get_last_event: Callable[[], float],
-) -> None:
-    """Force a Socket Mode reconnect if no event has arrived in INACTIVITY threshold."""
-    loop = asyncio.get_running_loop()
+async def socket_health_watchdog(socket_handler: AsyncSocketModeHandler) -> None:
+    """Force a Socket Mode reconnect only on positive evidence of a stuck socket.
+
+    `is_ping_pong_failing()` is the SDK's own liveness signal: PING/PONG flow
+    every ~10s between client and Slack independently of user activity. If it
+    stops flowing, the socket is dead. Mere absence of message events is NOT
+    evidence of breakage — quiet conversations are normal.
+    """
     while True:
-        await asyncio.sleep(30.0)
+        await asyncio.sleep(_PING_CHECK_INTERVAL)
         client = socket_handler.client
         if client is None:
             continue
-        now = loop.time()
-        if now - get_last_event() > _INACTIVITY_RECONNECT:
-            log.warning("no Slack events in %ss — forcing reconnect", _INACTIVITY_RECONNECT)
-            try:
+        try:
+            if not await client.is_connected():
+                continue  # Bolt's own reconnect logic handles disconnected sockets
+            if await client.is_ping_pong_failing():
+                log.warning("Socket Mode ping/pong failing — forcing reconnect")
                 await client.disconnect()
                 await asyncio.sleep(1)
                 await client.connect()
-            except Exception:
-                log.exception("watchdog reconnect failed")
+        except Exception:
+            log.exception("watchdog check failed")
 
 
 async def amain() -> None:
@@ -101,11 +103,9 @@ async def amain() -> None:
 
     bolt = AsyncApp(token=cfg.slack_bot_token, client=web_client)
     loop = asyncio.get_running_loop()
-    last_event_at = [loop.time()]
 
     @bolt.event("message")
     async def on_message(event, logger):
-        last_event_at[0] = loop.time()
         sd_notify.watchdog()
         if event.get("bot_id"):
             return
@@ -143,9 +143,7 @@ async def amain() -> None:
     tasks.append(asyncio.create_task(reader_pump(supervisor)))
     tasks.append(asyncio.create_task(reaper(supervisor)))
     tasks.append(asyncio.create_task(watchdog_heartbeat()))
-    tasks.append(
-        asyncio.create_task(socket_health_watchdog(socket_handler, lambda: last_event_at[0]))
-    )
+    tasks.append(asyncio.create_task(socket_health_watchdog(socket_handler)))
 
     try:
         await stop_event.wait()
