@@ -1,0 +1,165 @@
+"""Per-conversation worker. Owns the queue, mirrors transcript events to
+Slack, delivers Slack replies into the pane, suppresses delivery echo."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+from typing import Any, Protocol
+
+from slackbot.events import format_event
+from slackbot.registry import Registry
+
+log = logging.getLogger(__name__)
+
+# Cap how many uuids we remember per worker so memory stays bounded.
+_MAX_REMEMBERED_UUIDS = 1000
+# Cap on pending echo entries.
+_MAX_PENDING_ECHO = 64
+
+
+class _SlackIOProto(Protocol):
+    def channel_for_agent(self, agent: str) -> str: ...
+    async def post_top_level(self, text: str, channel: str | None = None) -> str: ...
+    async def post_in_thread(
+        self, thread_ts: str, text: str, channel: str | None = None
+    ) -> str: ...
+    async def edit_top_level(self, ts: str, text: str, channel: str | None = None) -> None: ...
+    async def react(self, ts: str, emoji: str, channel: str | None = None) -> None: ...
+
+
+class _ActuatorProto(Protocol):
+    async def deliver(self, session: str, pane_id: str, text: str) -> None: ...
+
+
+class Worker:
+    def __init__(
+        self,
+        sid: str,
+        reg: Registry,
+        slack: _SlackIOProto,
+        actuator: _ActuatorProto,
+    ) -> None:
+        self._sid = sid
+        self._reg = reg
+        self._slack = slack
+        self._actuator = actuator
+        self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._task: asyncio.Task[None] | None = None
+        self._posted_uuids: list[str] = []  # FIFO bounded
+        self._pending_echo: list[str] = []  # FIFO bounded
+
+    async def start(self) -> None:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run())
+
+    async def enqueue(self, event: dict[str, Any]) -> None:
+        await self._queue.put(event)
+
+    async def stop(self) -> None:
+        """Drain the queue, then cancel the task."""
+        await self._queue.join()
+        if self._task and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+
+    async def _run(self) -> None:
+        while True:
+            event = await self._queue.get()
+            try:
+                await self._dispatch(event)
+            except Exception:
+                log.exception("worker[%s] dispatch failed for %r", self._sid, event)
+            finally:
+                self._queue.task_done()
+
+    async def _dispatch(self, event: dict[str, Any]) -> None:
+        kind = event.get("kind", "")
+        method = getattr(self, f"_on_{kind}", None)
+        if method is None:
+            log.debug("worker[%s] no handler for kind=%s", self._sid, kind)
+            return
+        await method(event)
+
+    async def _on_prompt(self, ev: dict[str, Any]) -> None:
+        text = ev.get("text", "")
+        if text in self._pending_echo:
+            self._pending_echo.remove(text)
+            log.debug("worker[%s] echo suppressed: %r", self._sid, text)
+            return
+        await self._mirror("prompt", {"text": text}, ev.get("uuid"))
+
+    async def _on_response(self, ev: dict[str, Any]) -> None:
+        uuid = ev.get("uuid")
+        if uuid in self._posted_uuids:
+            return
+        await self._mirror("response", {"text": ev.get("text", "")}, uuid)
+
+    async def _on_notification(self, ev: dict[str, Any]) -> None:
+        data = {
+            "message": ev.get("message", ""),
+            "tool_request": ev.get("tool_request", ""),
+            "context": ev.get("context", ""),
+        }
+        await self._mirror("notification", data, uuid=None)
+
+    async def _on_error(self, ev: dict[str, Any]) -> None:
+        await self._mirror("error", {"text": ev.get("text", "")}, uuid=None)
+
+    async def _on_slack_reply(self, ev: dict[str, Any]) -> None:
+        text = ev["text"]
+        msg_ts = ev.get("msg_ts", "")
+        sess = self._reg.get_session(self._sid)
+        if sess is None:
+            return
+        channel = sess.slack_channel
+        if not sess.zellij_session or not sess.zellij_pane_id:
+            await self._slack.post_in_thread(
+                sess.slack_thread_ts or "",
+                "❌ delivery failed: session has no pane info",
+                channel=channel,
+            )
+            return
+        try:
+            await self._actuator.deliver(sess.zellij_session, sess.zellij_pane_id, text)
+        except Exception as exc:
+            await self._slack.post_in_thread(
+                sess.slack_thread_ts or "",
+                f"❌ delivery failed: {exc}",
+                channel=channel,
+            )
+            await self._slack.react(msg_ts, "warning", channel=channel)
+            return
+        self._remember_echo(text)
+        await self._slack.react(msg_ts, "white_check_mark", channel=channel)
+
+    async def _mirror(self, kind: str, data: dict[str, Any], uuid: str | None) -> None:
+        sess = self._reg.get_session(self._sid)
+        if sess is None:
+            return
+        if sess.name is None or sess.slack_thread_ts is None:
+            # Buffer for replay when /rn or auto-recovery binds the thread.
+            self._reg.buffer_event(self._sid, kind, json.dumps({**data, "agent": sess.agent}))
+            return
+        text = format_event(kind, {**data, "agent": sess.agent})
+        ts = await self._slack.post_in_thread(
+            sess.slack_thread_ts, text, channel=sess.slack_channel
+        )
+        if uuid:
+            self._remember_uuid(uuid)
+        # Record posted for traceability.
+        evt_id = self._reg.buffer_event(self._sid, kind, json.dumps({**data, "agent": sess.agent}))
+        self._reg.mark_event_posted(evt_id, ts)
+
+    def _remember_uuid(self, uuid: str) -> None:
+        self._posted_uuids.append(uuid)
+        if len(self._posted_uuids) > _MAX_REMEMBERED_UUIDS:
+            self._posted_uuids = self._posted_uuids[-_MAX_REMEMBERED_UUIDS:]
+
+    def _remember_echo(self, text: str) -> None:
+        self._pending_echo.append(text)
+        if len(self._pending_echo) > _MAX_PENDING_ECHO:
+            self._pending_echo = self._pending_echo[-_MAX_PENDING_ECHO:]
