@@ -6,7 +6,7 @@ import logging
 from typing import Protocol
 
 from slackbot.dedupe import DeliveryDedupe
-from slackbot.process_liveness import pid_is_alive
+from slackbot.process_liveness import session_is_alive
 from slackbot.registry import Registry
 from slackbot.zellij_io import ZellijError
 
@@ -32,14 +32,15 @@ class ReplyRouter:
         slack: _SlackIOProto,
         dedupe: DeliveryDedupe | None = None,
         *,
-        pid_alive_fn=pid_is_alive,
+        alive_fn=session_is_alive,
     ) -> None:
         self._reg = reg
         self._actuator = actuator
         self._slack = slack
         self._dedupe = dedupe
-        # Injected for tests; real code uses os.kill-based pid_is_alive.
-        self._pid_alive = pid_alive_fn
+        # Injected for tests; real code uses /proc-cmdline scanning that is
+        # robust to CC restarts under the same session id.
+        self._alive = alive_fn
 
     async def on_reply(self, channel: str, thread_ts: str, text: str, msg_ts: str) -> None:
         sess = self._reg.get_session_by_thread(thread_ts, channel)
@@ -54,16 +55,16 @@ class ReplyRouter:
             await self._slack.react(msg_ts, "no_entry_sign", channel=channel)
             return
 
-        # Liveness guard via PID. Only marks dead when we have positive evidence
-        # (cc_pid recorded and the process no longer exists). Idle-but-alive
-        # sessions deliver normally — no time-based staleness here.
-        if sess.cc_pid is not None and not self._pid_alive(sess.cc_pid):
+        # Liveness via /proc cmdline lookup of the session id. This is stable
+        # across CC restarts that reuse the session id (claude-auto-resume),
+        # which the older pid-only check kept misclassifying as dead.
+        if not self._alive(sess.cc_session_id, sess.cc_pid):
             self._reg.set_status(sess.cc_session_id, "ended")
             await self._slack.post_in_thread(
                 thread_ts,
-                f"⚠️ CC process (pid {sess.cc_pid}) is no longer running. "
-                f"Reply not sent — start a new CC session in this workspace and "
-                f"it will auto-rebind to this thread.",
+                "⚠️ No running CC process found for this session. "
+                "Reply not sent — start a new CC session in this workspace and "
+                "it will auto-rebind to this thread.",
                 channel=channel,
             )
             await self._slack.react(msg_ts, "no_entry_sign", channel=channel)
