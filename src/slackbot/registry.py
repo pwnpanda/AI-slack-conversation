@@ -170,6 +170,44 @@ class Registry:
             (status, int(time.time()), cc_session_id),
         )
 
+    def find_recoverable_session(
+        self,
+        zellij_session: str | None,
+        cwd: str,
+        agent: str,
+        exclude_sid: str,
+        stale_after_seconds: int,
+    ) -> Session | None:
+        """Find a named predecessor in the same (zellij_session, cwd, agent) workspace
+        that is safe to inherit a name+thread from.
+
+        Safety: only return a row whose CC process is no longer alive — either
+        status='ended' or last_event_at older than `stale_after_seconds`. This keeps
+        a still-running peer session in the same cwd from being silently hijacked.
+
+        Returns the most recently active matching row, or None.
+        """
+        cutoff = int(time.time()) - stale_after_seconds
+        row = (
+            self._c()
+            .execute(
+                """
+                SELECT * FROM sessions
+                WHERE name IS NOT NULL
+                  AND cwd = ?
+                  AND zellij_session IS ?
+                  AND agent = ?
+                  AND cc_session_id != ?
+                  AND (status = 'ended' OR last_event_at < ?)
+                ORDER BY last_event_at DESC
+                LIMIT 1
+                """,
+                (cwd, zellij_session, agent, exclude_sid, cutoff),
+            )
+            .fetchone()
+        )
+        return _row_to_session(row) if row else None
+
     def claim_name(self, cc_session_id: str, name: str) -> str | None:
         """Claim `name` for `cc_session_id`. Returns prior holder's thread_ts (or None)."""
         current = self.get_session(cc_session_id)

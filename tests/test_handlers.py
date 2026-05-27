@@ -197,3 +197,80 @@ async def test_resumed_start_flips_back_to_active(reg: Registry) -> None:
     resumed["resumed"] = True
     await h.handle(resumed)
     assert slack.edits[-1][1] == "🟢 [Claude] myproj  ·  /x"
+
+
+@pytest.mark.asyncio
+async def test_claude_start_auto_recovers_named_session_in_same_workspace(
+    reg: Registry,
+) -> None:
+    """A new Claude CC session in the same (zellij_session, cwd, agent) workspace
+    as a dead named predecessor should inherit the name and Slack thread
+    automatically — no /rn required."""
+    slack = FakeSlackIO()
+    h = EventHandlers(reg, slack, stale_after_seconds=21600)
+
+    # Predecessor: previously /rn'd as 'Finance' but now dead (status=ended).
+    await h.handle(_start(sid="old-sid", cwd="/home/r/Finance", pane="6"))
+    await h.handle({"kind": "name", "session_id": "old-sid", "name": "Finance"})
+    await h.handle({"kind": "end", "session_id": "old-sid", "reason": "x"})
+    slack.top_level_posts.clear()
+    slack.thread_posts.clear()
+    slack.edits.clear()
+
+    # New CC starts in the same cwd; should auto-rebind.
+    await h.handle(_start(sid="new-sid", cwd="/home/r/Finance", pane="42"))
+
+    new_sess = reg.get_session("new-sid")
+    assert new_sess is not None
+    assert new_sess.name == "Finance"
+    assert new_sess.slack_thread_ts is not None
+    # No new top-level message — we reused the existing thread.
+    assert slack.top_level_posts == []
+    # A divider posted into the existing thread marking auto-rebind.
+    assert any("auto-rebound" in t for _, t in slack.thread_posts)
+
+
+@pytest.mark.asyncio
+async def test_auto_recover_skips_when_predecessor_is_still_fresh(
+    reg: Registry,
+) -> None:
+    """If the prior named session is still active and fresh (recent events), do
+    NOT hijack its name — there's a live peer in the same cwd."""
+    slack = FakeSlackIO()
+    h = EventHandlers(reg, slack, stale_after_seconds=21600)
+
+    await h.handle(_start(sid="alive-sid", cwd="/home/r/Finance", pane="6"))
+    await h.handle({"kind": "name", "session_id": "alive-sid", "name": "Finance"})
+    slack.top_level_posts.clear()
+    slack.thread_posts.clear()
+
+    # New CC in same cwd while old one is still active and fresh.
+    await h.handle(_start(sid="other-sid", cwd="/home/r/Finance", pane="42"))
+
+    other = reg.get_session("other-sid")
+    assert other is not None
+    assert other.name is None  # not hijacked
+    alive = reg.get_session("alive-sid")
+    assert alive is not None
+    assert alive.name == "Finance"  # original still owns it
+
+
+@pytest.mark.asyncio
+async def test_auto_recover_does_not_cross_agents(reg: Registry) -> None:
+    """A codex session must not auto-recover a claude name."""
+    slack = FakeSlackIO()
+    h = EventHandlers(reg, slack, stale_after_seconds=21600)
+
+    await h.handle(_start(sid="claude-old", cwd="/p", agent="claude"))
+    await h.handle({"kind": "name", "session_id": "claude-old", "name": "Finance"})
+    await h.handle({"kind": "end", "session_id": "claude-old", "reason": "x"})
+    slack.top_level_posts.clear()
+    slack.thread_posts.clear()
+
+    # New codex session in same cwd should NOT inherit the Claude "Finance" name.
+    await h.handle(_start(sid="codex-new", cwd="/p", agent="codex"))
+
+    codex_sess = reg.get_session("codex-new")
+    assert codex_sess is not None
+    # Codex auto-registers under its own name pattern, never "Finance".
+    assert codex_sess.name != "Finance"

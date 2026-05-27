@@ -32,10 +32,12 @@ class EventHandlers:
         reg: Registry,
         slack: _SlackIOProto,
         dedupe: DeliveryDedupe | None = None,
+        stale_after_seconds: int = 21600,
     ) -> None:
         self._reg = reg
         self._slack = slack
         self._dedupe = dedupe
+        self._stale_after = stale_after_seconds
 
     async def handle(self, event: dict[str, Any]) -> None:
         kind = event.get("kind", "")
@@ -54,10 +56,12 @@ class EventHandlers:
         prior = self._reg.get_session(sid)
         agent = _agent(ev.get("agent"))
         channel = self._slack.channel_for_agent(agent)
+        cwd = ev["cwd"]
+        zellij_session = ev.get("zellij_session")
         self._reg.upsert_session(
             sid,
-            ev["cwd"],
-            ev.get("zellij_session"),
+            cwd,
+            zellij_session,
             ev.get("zellij_pane_id"),
             agent=agent,
             slack_channel=channel,
@@ -71,12 +75,40 @@ class EventHandlers:
             )
             return
 
+        # Auto-recover: if a prior named session in the same (cwd, zellij_session,
+        # agent) workspace is dead/stale, inherit its name and thread so the user
+        # doesn't have to /rn after every CC restart.
+        recovered = self._reg.find_recoverable_session(
+            zellij_session=zellij_session,
+            cwd=cwd,
+            agent=agent,
+            exclude_sid=sid,
+            stale_after_seconds=self._stale_after,
+        )
+        if recovered and recovered.name:
+            log.info(
+                "auto-recovering name=%r from %s into new session %s (cwd=%s)",
+                recovered.name,
+                recovered.cc_session_id,
+                sid,
+                cwd,
+            )
+            await self._on_name(
+                {
+                    "kind": "name",
+                    "session_id": sid,
+                    "name": recovered.name,
+                    "auto_recovered": True,
+                }
+            )
+            return
+
         if _auto_registers(agent):
             await self._on_name(
                 {
                     "kind": "name",
                     "session_id": sid,
-                    "name": _auto_name(agent, ev["cwd"], sid),
+                    "name": _auto_name(agent, cwd, sid),
                 }
             )
 
@@ -96,9 +128,10 @@ class EventHandlers:
             sess = self._reg.get_session(sid)
             assert sess is not None
             if prior_thread:
+                marker = "auto-rebound" if ev.get("auto_recovered") else "resumed"
                 await self._slack.post_in_thread(
                     prior_thread,
-                    f"─── 🔄 resumed in new session @ {_iso_now()} ───",
+                    f"─── 🔄 {marker} in new session @ {_iso_now()} ───",
                     channel=sess.slack_channel,
                 )
             else:
