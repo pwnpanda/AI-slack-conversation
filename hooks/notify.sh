@@ -42,10 +42,15 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
     | awk 'NF { print; exit }' || true)"
 fi
 
-payload="$(jq -n --arg sid "$sid" --arg agent "$agent" --arg m "$msg" \
+cc_pid="$PPID"
+payload="$(jq -n \
+  --arg sid "$sid" --arg agent "$agent" --arg m "$msg" \
   --arg ctx "$context" --arg tool "$tool_request" \
+  --arg zs "${ZELLIJ_SESSION_NAME:-}" --arg zp "${ZELLIJ_PANE_ID:-}" \
+  --argjson cc_pid "$cc_pid" \
   '{v:1,kind:"notification",session_id:$sid,agent:$agent,message:$m,
-     context:$ctx,tool_request:$tool}')"
+     context:$ctx,tool_request:$tool,
+     zellij_session:$zs,zellij_pane_id:$zp,cc_pid:$cc_pid}')"
 curl -fsS --max-time 1 -H 'content-type: application/json' \
   -d "$payload" "http://127.0.0.1:${PORT}/event" >/dev/null 2>&1 || true
 printf '{}\n'

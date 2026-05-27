@@ -45,6 +45,21 @@ class EventHandlers:
         if not sid:
             log.warning("event missing session_id: %r", event)
             return
+        # Refresh mutable runtime fields (pid, pane id) from any event other than
+        # 'start' (which does its own full upsert). Lets a long-running CC heal
+        # the registry after a zellij restart or after we added cc_pid to schema.
+        if kind != "start" and self._reg.get_session(sid) is not None:
+            cc_pid_raw = event.get("cc_pid")
+            try:
+                cc_pid_val = int(cc_pid_raw) if cc_pid_raw is not None else None
+            except (TypeError, ValueError):
+                cc_pid_val = None
+            self._reg.refresh_liveness(
+                sid,
+                event.get("zellij_session"),
+                event.get("zellij_pane_id"),
+                cc_pid_val,
+            )
         method = getattr(self, f"_on_{kind}", None)
         if method is None:
             log.warning("no handler for kind=%s", kind)

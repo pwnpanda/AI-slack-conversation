@@ -38,7 +38,7 @@ async def socket_health_watchdog(
         try:
             await asyncio.sleep(interval_seconds)
             client = socket_handler.client
-            if client is None or not client.is_connected():
+            if client is None or not await client.is_connected():
                 continue
             if await client.is_ping_pong_failing():
                 log.warning("Socket Mode ping/pong failing — forcing reconnect.")

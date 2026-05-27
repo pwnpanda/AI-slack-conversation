@@ -288,6 +288,38 @@ class Registry:
             (slack_msg_ts, event_id),
         )
 
+    def refresh_liveness(
+        self,
+        cc_session_id: str,
+        zellij_session: str | None,
+        zellij_pane_id: str | None,
+        cc_pid: int | None,
+    ) -> None:
+        """Update mutable runtime fields without touching name/thread state.
+
+        Called on every non-start event so that a long-running CC's pane id and
+        pid stay current — fixes the case where SessionStart fired before zellij
+        was restarted (pane id reassigned) and where legacy rows never got cc_pid.
+        Skips any field whose new value is empty so we don't clobber a known good
+        value with NULL from a hook that didn't carry that field.
+        """
+        sets: list[str] = ["last_event_at = ?"]
+        params: list[object] = [int(time.time())]
+        if zellij_session:
+            sets.append("zellij_session = ?")
+            params.append(zellij_session)
+        if zellij_pane_id:
+            sets.append("zellij_pane_id = ?")
+            params.append(zellij_pane_id)
+        if cc_pid is not None and cc_pid > 0:
+            sets.append("cc_pid = ?")
+            params.append(cc_pid)
+        params.append(cc_session_id)
+        self._c().execute(
+            f"UPDATE sessions SET {', '.join(sets)} WHERE cc_session_id = ?",
+            params,
+        )
+
 
 def _row_to_session(row: sqlite3.Row) -> Session:
     return Session(

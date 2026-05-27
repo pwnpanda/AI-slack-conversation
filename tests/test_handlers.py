@@ -274,3 +274,51 @@ async def test_auto_recover_does_not_cross_agents(reg: Registry) -> None:
     assert codex_sess is not None
     # Codex auto-registers under its own name pattern, never "Finance".
     assert codex_sess.name != "Finance"
+
+
+@pytest.mark.asyncio
+async def test_non_start_events_refresh_cc_pid_and_pane(reg: Registry) -> None:
+    """Hooks other than SessionStart now carry cc_pid and pane id so a
+    long-running CC heals legacy rows that pre-date the schema."""
+    slack = FakeSlackIO()
+    h = EventHandlers(reg, slack)
+    # Simulate a legacy row: name + thread set, but no cc_pid and stale pane.
+    reg.upsert_session("s1", "/p", "main", "OLD", agent="claude")
+    reg.set_name("s1", "Finance")
+    reg.set_thread_ts("s1", "T.1")
+
+    # A prompt event arrives with current pane + pid.
+    await h.handle(
+        {
+            "kind": "prompt",
+            "session_id": "s1",
+            "agent": "claude",
+            "text": "anything",
+            "zellij_session": "main",
+            "zellij_pane_id": "NEW",
+            "cc_pid": 42424,
+        }
+    )
+
+    sess = reg.get_session("s1")
+    assert sess is not None
+    assert sess.cc_pid == 42424
+    assert sess.zellij_pane_id == "NEW"
+
+
+@pytest.mark.asyncio
+async def test_refresh_does_not_clobber_with_missing_fields(reg: Registry) -> None:
+    """Events that don't carry zellij/pid fields must not wipe known values."""
+    slack = FakeSlackIO()
+    h = EventHandlers(reg, slack)
+    reg.upsert_session("s1", "/p", "main", "13", agent="claude", cc_pid=999)
+    reg.set_name("s1", "p")
+    reg.set_thread_ts("s1", "T.1")
+
+    # Event with no zellij/pid info (e.g. a kind we don't track).
+    await h.handle({"kind": "prompt", "session_id": "s1", "text": "x"})
+
+    sess = reg.get_session("s1")
+    assert sess is not None
+    assert sess.cc_pid == 999
+    assert sess.zellij_pane_id == "13"

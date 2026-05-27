@@ -23,8 +23,13 @@ name="$(printf '%s' "$prompt" \
     -e 's@^rn[[:space:]]+([^[:space:]]+)[[:space:]]*$@\1@p' \
     -e 's@^[/#!](rn|rename|register)[[:space:]]+([^[:space:]]+)[[:space:]]*$@\2@p')"
 if [ -n "$name" ]; then
-  name_payload="$(jq -n --arg sid "$sid" --arg agent "$agent" --arg n "$name" \
-    '{v:1,kind:"name",session_id:$sid,agent:$agent,name:$n}')"
+  cc_pid="$PPID"
+  name_payload="$(jq -n \
+    --arg sid "$sid" --arg agent "$agent" --arg n "$name" \
+    --arg zs "${ZELLIJ_SESSION_NAME:-}" --arg zp "${ZELLIJ_PANE_ID:-}" \
+    --argjson cc_pid "$cc_pid" \
+    '{v:1,kind:"name",session_id:$sid,agent:$agent,name:$n,
+      zellij_session:$zs,zellij_pane_id:$zp,cc_pid:$cc_pid}')"
   if [ "$agent" = "codex" ] || [ "$agent" = "gemini" ]; then
     if post "$name_payload"; then
       reason="Renamed Slack thread to $name"
@@ -37,8 +42,13 @@ if [ -n "$name" ]; then
   fi
 fi
 
-prompt_payload="$(jq -n --arg sid "$sid" --arg agent "$agent" --arg t "$prompt" \
-  '{v:1,kind:"prompt",session_id:$sid,agent:$agent,text:$t}')"
+cc_pid="$PPID"
+prompt_payload="$(jq -n \
+  --arg sid "$sid" --arg agent "$agent" --arg t "$prompt" \
+  --arg zs "${ZELLIJ_SESSION_NAME:-}" --arg zp "${ZELLIJ_PANE_ID:-}" \
+  --argjson cc_pid "$cc_pid" \
+  '{v:1,kind:"prompt",session_id:$sid,agent:$agent,text:$t,
+    zellij_session:$zs,zellij_pane_id:$zp,cc_pid:$cc_pid}')"
 post "$prompt_payload" || true
 
 if [ -n "$name" ]; then
