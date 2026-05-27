@@ -14,10 +14,19 @@ class ZellijError(RuntimeError):
 
 
 class ZellijActuator:
+    def __init__(self) -> None:
+        # Serialize deliveries: focus + write-chars + Enter are three separate
+        # zellij calls. With concurrent deliveries to different panes, a second
+        # delivery's `focus` could land between the first delivery's `focus` and
+        # `write-chars`, sending the first reply's text into the second pane.
+        # The lock keeps each three-call sequence atomic.
+        self._lock = asyncio.Lock()
+
     async def deliver(self, session: str, pane_id: str, text: str) -> None:
-        await self._zellij(session, "action", "focus-pane-id", pane_id, allow_already=True)
-        await self._zellij(session, "action", "write-chars", text)
-        await self._zellij(session, "action", "write", "13")
+        async with self._lock:
+            await self._zellij(session, "action", "focus-pane-id", pane_id, allow_already=True)
+            await self._zellij(session, "action", "write-chars", text)
+            await self._zellij(session, "action", "write", "13")
 
     async def _zellij(self, session: str, *args: str, allow_already: bool = False) -> None:
         cmd = ["zellij", "--session", session, *args]
