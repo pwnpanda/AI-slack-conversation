@@ -1,4 +1,4 @@
-"""Wires hook events through the registry to Slack."""
+"""HTTP event handlers: turn POSTed hook events into supervisor calls."""
 
 from __future__ import annotations
 
@@ -7,37 +7,21 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import PurePath
-from typing import Any, Protocol
+from typing import Any
 
-from slackbot.dedupe import DeliveryDedupe
-from slackbot.events import format_event, top_level_text
-from slackbot.registry import Registry, Session
+from slackbot.events import top_level_text
+from slackbot.process_liveness import session_is_alive
+from slackbot.registry import Registry
+from slackbot.supervisor import Supervisor
 
 log = logging.getLogger(__name__)
 
 
-class _SlackIOProto(Protocol):
-    def channel_for_agent(self, agent: str) -> str: ...
-    async def post_top_level(self, text: str, channel: str | None = None) -> str: ...
-    async def post_in_thread(
-        self, thread_ts: str, text: str, channel: str | None = None
-    ) -> str: ...
-    async def edit_top_level(self, ts: str, text: str, channel: str | None = None) -> None: ...
-    async def react(self, ts: str, emoji: str, channel: str | None = None) -> None: ...
-
-
 class EventHandlers:
-    def __init__(
-        self,
-        reg: Registry,
-        slack: _SlackIOProto,
-        dedupe: DeliveryDedupe | None = None,
-        stale_after_seconds: int = 21600,
-    ) -> None:
+    def __init__(self, reg: Registry, supervisor: Supervisor, slack) -> None:
         self._reg = reg
+        self._sup = supervisor
         self._slack = slack
-        self._dedupe = dedupe
-        self._stale_after = stale_after_seconds
 
     async def handle(self, event: dict[str, Any]) -> None:
         kind = event.get("kind", "")
@@ -45,26 +29,12 @@ class EventHandlers:
         if not sid:
             log.warning("event missing session_id: %r", event)
             return
-        # Refresh mutable runtime fields (pid, pane id) from any event other than
-        # 'start' (which does its own full upsert). Lets a long-running CC heal
-        # the registry after a zellij restart or after we added cc_pid to schema.
-        if kind != "start" and self._reg.get_session(sid) is not None:
-            cc_pid_raw = event.get("cc_pid")
-            try:
-                cc_pid_val = int(cc_pid_raw) if cc_pid_raw is not None else None
-            except (TypeError, ValueError):
-                cc_pid_val = None
-            self._reg.refresh_liveness(
-                sid,
-                event.get("zellij_session"),
-                event.get("zellij_pane_id"),
-                cc_pid_val,
-            )
         method = getattr(self, f"_on_{kind}", None)
         if method is None:
             log.warning("no handler for kind=%s", kind)
             return
         await method(event)
+        await self._sup.touch(sid)
 
     async def _on_start(self, ev: dict[str, Any]) -> None:
         sid = ev["session_id"]
@@ -73,11 +43,9 @@ class EventHandlers:
         channel = self._slack.channel_for_agent(agent)
         cwd = ev["cwd"]
         zellij_session = ev.get("zellij_session")
-        cc_pid_raw = ev.get("cc_pid")
-        try:
-            cc_pid: int | None = int(cc_pid_raw) if cc_pid_raw is not None else None
-        except (TypeError, ValueError):
-            cc_pid = None
+        cc_pid = _int_or_none(ev.get("cc_pid"))
+        transcript_path = ev.get("transcript_path") or None
+
         self._reg.upsert_session(
             sid,
             cwd,
@@ -86,33 +54,29 @@ class EventHandlers:
             agent=agent,
             slack_channel=channel,
             cc_pid=cc_pid,
+            transcript_path=transcript_path,
         )
+
+        if transcript_path:
+            self._sup.attach_reader(sid, transcript_path)
+        await self._sup.get_or_create(sid)
+
         if prior and prior.name and prior.slack_thread_ts:
-            prior_channel = prior.slack_channel
             await self._slack.edit_top_level(
                 prior.slack_thread_ts,
                 top_level_text(prior.name, prior.cwd, "active", prior.agent),
-                channel=prior_channel,
+                channel=prior.slack_channel,
             )
             return
 
-        # Auto-recover: if a prior named session in the same (cwd, zellij_session,
-        # agent) workspace is dead/stale, inherit its name and thread so the user
-        # doesn't have to /rn after every CC restart.
         recovered = self._reg.find_recoverable_session(
-            zellij_session=zellij_session,
-            cwd=cwd,
-            agent=agent,
-            exclude_sid=sid,
+            zellij_session=zellij_session, cwd=cwd, agent=agent, exclude_sid=sid
         )
-        if recovered and recovered.name and recovered.status == "ended":
-            log.info(
-                "auto-recovering name=%r from %s into new session %s (cwd=%s)",
-                recovered.name,
-                recovered.cc_session_id,
-                sid,
-                cwd,
-            )
+        if (
+            recovered
+            and recovered.name
+            and not session_is_alive(recovered.cc_session_id, recovered.cc_pid, recovered.name)
+        ):
             await self._on_name(
                 {
                     "kind": "name",
@@ -139,11 +103,11 @@ class EventHandlers:
         if sess is None:
             log.warning("name event for unknown session %s", sid)
             return
-
         if sess.name == new_name:
             return
 
         if sess.name is None:
+            # First time naming this session: claim across the registry.
             prior_thread = self._reg.claim_name(sid, new_name)
             sess = self._reg.get_session(sid)
             assert sess is not None
@@ -160,10 +124,16 @@ class EventHandlers:
                     channel=sess.slack_channel,
                 )
                 self._reg.set_thread_ts(sid, ts)
-                sess = self._reg.get_session(sid)
-                assert sess is not None
-            await self._drain_buffer(sess)
+
+            # Replay buffered events into the worker.
+            worker = await self._sup.get_or_create(sid)
+            for buffered in self._reg.drain_unposted(sid):
+                data = json.loads(buffered.payload)
+                replay = {"kind": buffered.kind, **data}
+                await worker.enqueue(replay)
+                self._reg.mark_event_posted(buffered.id, "replayed")
         else:
+            # Rename: update the existing thread header in-place.
             self._reg.set_name(sid, new_name)
             if sess.slack_thread_ts:
                 await self._slack.edit_top_level(
@@ -171,26 +141,6 @@ class EventHandlers:
                     top_level_text(new_name, sess.cwd, sess.status, sess.agent),
                     channel=sess.slack_channel,
                 )
-
-    async def _on_prompt(self, ev: dict[str, Any]) -> None:
-        sid = ev["session_id"]
-        text = ev.get("text", "")
-        if self._dedupe and self._dedupe.consume(sid, text):
-            log.debug("prompt suppressed (originated from Slack delivery): %r", text)
-            return
-        await self._post_or_buffer(sid, "prompt", {"text": text})
-
-    async def _on_response(self, ev: dict[str, Any]) -> None:
-        data = {"text": ev.get("text", ""), "tool_summary": ev.get("tool_summary")}
-        await self._post_or_buffer(ev["session_id"], "response", data)
-
-    async def _on_notification(self, ev: dict[str, Any]) -> None:
-        await self._post_or_buffer(
-            ev["session_id"], "notification", {"message": ev.get("message", "")}
-        )
-
-    async def _on_error(self, ev: dict[str, Any]) -> None:
-        await self._post_or_buffer(ev["session_id"], "error", {"text": ev.get("text", "")})
 
     async def _on_end(self, ev: dict[str, Any]) -> None:
         sid = ev["session_id"]
@@ -202,35 +152,33 @@ class EventHandlers:
                 top_level_text(sess.name, sess.cwd, "ended", sess.agent),
                 channel=sess.slack_channel,
             )
+        self._sup.detach_reader(sid)
 
-    async def _post_or_buffer(self, sid: str, kind: str, data: dict[str, Any]) -> None:
+    async def _on_notification(self, ev: dict[str, Any]) -> None:
+        sid = ev["session_id"]
+        # Refresh runtime fields opportunistically (cc_pid keeps drift in check).
+        self._refresh_runtime(sid, ev)
+        worker = await self._sup.get_or_create(sid)
+        await worker.enqueue(
+            {
+                "kind": "notification",
+                "message": ev.get("message", ""),
+                "tool_request": ev.get("tool_request", ""),
+                "context": ev.get("context", ""),
+            }
+        )
+
+    def _refresh_runtime(self, sid: str, ev: dict[str, Any]) -> None:
         sess = self._reg.get_session(sid)
         if sess is None:
-            log.warning("event for unknown session %s", sid)
             return
-        data = {**data, "agent": sess.agent}
-        payload = json.dumps(data)
-        if sess.name is None or sess.slack_thread_ts is None:
-            self._reg.buffer_event(sid, kind, payload)
-            return
-        text = format_event(kind, data)
-        ts = await self._slack.post_in_thread(
-            sess.slack_thread_ts, text, channel=sess.slack_channel
+        cc_pid = _int_or_none(ev.get("cc_pid"))
+        self._reg.refresh_liveness(
+            sid,
+            ev.get("zellij_session") or sess.zellij_session,
+            ev.get("zellij_pane_id") or sess.zellij_pane_id,
+            cc_pid,
         )
-        evt_id = self._reg.buffer_event(sid, kind, payload)
-        self._reg.mark_event_posted(evt_id, ts)
-
-    async def _drain_buffer(self, sess: Session) -> None:
-        assert sess.slack_thread_ts is not None
-        for ev in self._reg.drain_unposted(sess.cc_session_id):
-            data = json.loads(ev.payload)
-            data = {**data, "agent": data.get("agent", sess.agent)}
-            ts = await self._slack.post_in_thread(
-                sess.slack_thread_ts,
-                format_event(ev.kind, data),
-                channel=sess.slack_channel,
-            )
-            self._reg.mark_event_posted(ev.id, ts)
 
 
 def _iso_now() -> str:
@@ -253,3 +201,10 @@ def _auto_name(agent: str, cwd: str, sid: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", project).strip("-").lower() or "session"
     short_sid = re.sub(r"[^a-zA-Z0-9]+", "", sid)[:8] or "session"
     return f"{agent}-{slug}-{short_sid}"
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
