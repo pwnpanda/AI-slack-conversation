@@ -18,6 +18,7 @@ class Config:
     tmp_dir: str
     verbose: str
     log_level: str
+    stale_after_seconds: int
 
     def channel_for_agent(self, agent: str) -> str:
         return self.agent_channels.get(agent.lower(), self.slack_channel_id)
@@ -55,4 +56,7 @@ def load_config() -> Config:
         tmp_dir=os.environ.get("SLACKBOT_TMP_DIR", "/tmp"),
         verbose=os.environ.get("CC_SLACK_VERBOSE", "off"),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
+        # 6h default: a session that hasn't fired any hook in 6h is likely dead
+        # (panes killed, zellij restarted, etc.) — replies would misroute.
+        stale_after_seconds=int(os.environ.get("SLACKBOT_STALE_AFTER_SECONDS", "21600")),
     )

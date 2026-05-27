@@ -41,7 +41,9 @@ async def amain() -> None:
     dedupe = DeliveryDedupe()
     handlers = EventHandlers(reg, slack_io, dedupe=dedupe)
     actuator = ZellijActuator()
-    router = ReplyRouter(reg, actuator, slack_io, dedupe=dedupe)
+    router = ReplyRouter(
+        reg, actuator, slack_io, dedupe=dedupe, stale_after_seconds=cfg.stale_after_seconds
+    )
 
     bolt = AsyncApp(token=cfg.slack_bot_token, client=web_client)
 

@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, field
 
 import pytest
@@ -93,3 +94,39 @@ async def test_reply_failure_posts_error_and_reacts_warn(reg: Registry) -> None:
     await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
     assert any("delivery failed" in t for _, t in slack.thread_posts)
     assert ("MSG.1", "warning") in slack.reacts
+
+
+@pytest.mark.asyncio
+async def test_reply_to_stale_active_session_warns_and_marks_ended(reg: Registry) -> None:
+    reg.upsert_session("s1", "/x", "main", "3")
+    reg.set_name("s1", "Finance")
+    reg.set_thread_ts("s1", "TOP.1")
+    # Backdate last_event_at to 24h ago to simulate a dead session.
+    reg._c().execute(
+        "UPDATE sessions SET last_event_at = ? WHERE cc_session_id = ?",
+        (int(time.time()) - 86400, "s1"),
+    )
+    actuator = FakeActuator()
+    slack = FakeSlackIO()
+    router = ReplyRouter(reg, actuator, slack, stale_after_seconds=21600)
+    await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
+    assert actuator.deliveries == []  # not delivered
+    assert any("looks dead" in t for _, t in slack.thread_posts)
+    assert any("/rn Finance" in t for _, t in slack.thread_posts)
+    assert ("MSG.1", "no_entry_sign") in slack.reacts
+    # And the session is now marked ended, so future replies short-circuit.
+    sess = reg.get_session("s1")
+    assert sess is not None and sess.status == "ended"
+
+
+@pytest.mark.asyncio
+async def test_reply_to_fresh_session_still_delivers(reg: Registry) -> None:
+    reg.upsert_session("s1", "/x", "main", "3")
+    reg.set_name("s1", "p")
+    reg.set_thread_ts("s1", "TOP.1")
+    # last_event_at is "now" from upsert_session
+    actuator = FakeActuator()
+    slack = FakeSlackIO()
+    router = ReplyRouter(reg, actuator, slack, stale_after_seconds=21600)
+    await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
+    assert actuator.deliveries == [("main", "3", "x")]

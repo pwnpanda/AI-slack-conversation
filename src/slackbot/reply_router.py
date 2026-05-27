@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Protocol
 
 from slackbot.dedupe import DeliveryDedupe
@@ -30,11 +31,13 @@ class ReplyRouter:
         actuator: _ActuatorProto,
         slack: _SlackIOProto,
         dedupe: DeliveryDedupe | None = None,
+        stale_after_seconds: int = 21600,
     ) -> None:
         self._reg = reg
         self._actuator = actuator
         self._slack = slack
         self._dedupe = dedupe
+        self._stale_after = stale_after_seconds
 
     async def on_reply(self, channel: str, thread_ts: str, text: str, msg_ts: str) -> None:
         sess = self._reg.get_session_by_thread(thread_ts, channel)
@@ -45,6 +48,23 @@ class ReplyRouter:
         if sess.status == "ended":
             await self._slack.post_in_thread(
                 thread_ts, "⚠️ session offline, reply not sent", channel=channel
+            )
+            await self._slack.react(msg_ts, "no_entry_sign", channel=channel)
+            return
+
+        # Stale guard: registry says active, but no hooks have fired in a long time.
+        # Almost certainly means CC process died (e.g. zellij was killed). The pane
+        # id is now meaningless and would misroute. Refuse delivery.
+        age = int(time.time()) - sess.last_event_at
+        if age > self._stale_after:
+            hours = age // 3600
+            self._reg.set_status(sess.cc_session_id, "ended")
+            await self._slack.post_in_thread(
+                thread_ts,
+                f"⚠️ session looks dead (no activity for ~{hours}h). "
+                f"Reply not sent — start a new CC session and run `/rn {sess.name}` "
+                f"to rebind this thread.",
+                channel=channel,
             )
             await self._slack.react(msg_ts, "no_entry_sign", channel=channel)
             return
