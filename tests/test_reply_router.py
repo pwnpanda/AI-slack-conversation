@@ -1,39 +1,38 @@
-import time
 from dataclasses import dataclass, field
 
 import pytest
 
+from slackbot.liveness_cache import LivenessCache
 from slackbot.registry import Registry
 from slackbot.reply_router import ReplyRouter
-from slackbot.zellij_io import ZellijError
+from slackbot.supervisor import Supervisor
 
 
 @dataclass
-class FakeActuator:
-    deliveries: list[tuple[str, str, str]] = field(default_factory=list)
-    fail: bool = False
-
-    async def deliver(self, session: str, pane_id: str, text: str) -> None:
-        if self.fail:
-            raise ZellijError("boom")
-        self.deliveries.append((session, pane_id, text))
-
-
-@dataclass
-class FakeSlackIO:
+class FakeSlack:
     thread_posts: list[tuple[str, str]] = field(default_factory=list)
-    thread_channels: list[str | None] = field(default_factory=list)
     reacts: list[tuple[str, str]] = field(default_factory=list)
-    react_channels: list[str | None] = field(default_factory=list)
 
-    async def post_in_thread(self, thread_ts: str, text: str, channel: str | None = None) -> str:
+    def channel_for_agent(self, agent):
+        return f"C-{agent.upper()}"
+
+    async def post_top_level(self, text, channel=None):
+        return "top.1"
+
+    async def post_in_thread(self, thread_ts, text, channel=None):
         self.thread_posts.append((thread_ts, text))
-        self.thread_channels.append(channel)
-        return "x.x"
+        return "thr.1"
 
-    async def react(self, ts: str, emoji: str, channel: str | None = None) -> None:
+    async def edit_top_level(self, ts, text, channel=None):
+        pass
+
+    async def react(self, ts, emoji, channel=None):
         self.reacts.append((ts, emoji))
-        self.react_channels.append(channel)
+
+
+class _NoopActuator:
+    async def deliver(self, *a, **kw):
+        pass
 
 
 @pytest.fixture
@@ -44,120 +43,47 @@ def reg(tmp_db_path: str):
     r.close()
 
 
+def _alive_cache(alive: bool) -> LivenessCache:
+    return LivenessCache(lambda *_: alive, ttl_seconds=10, clock=lambda: 0.0)
+
+
 @pytest.mark.asyncio
-async def test_reply_routes_to_correct_pane(reg: Registry) -> None:
-    reg.upsert_session("s1", "/x", "main", "3", agent="codex", slack_channel="C-CODEX")
-    reg.set_name("s1", "myproj")
+async def test_reply_enqueues_into_worker(reg: Registry) -> None:
+    reg.upsert_session("s1", "/x", "main", "3", agent="claude", slack_channel="C-CLAUDE")
+    reg.set_name("s1", "p")
     reg.set_thread_ts("s1", "TOP.1")
-    actuator = FakeActuator()
-    slack = FakeSlackIO()
-    router = ReplyRouter(reg, actuator, slack)
-    await router.on_reply(channel="C-CODEX", thread_ts="TOP.1", text="do X", msg_ts="MSG.1")
-    assert actuator.deliveries == [("main", "3", "do X")]
-    assert ("MSG.1", "white_check_mark") in slack.reacts
-    assert "C-CODEX" in slack.react_channels
+    slack = FakeSlack()
+    sup = Supervisor(reg=reg, slack=slack, actuator=_NoopActuator())
+    router = ReplyRouter(reg=reg, supervisor=sup, liveness=_alive_cache(True), slack=slack)
+    await router.on_reply(channel="C-CLAUDE", thread_ts="TOP.1", text="do X", msg_ts="MSG.1")
+    # Worker exists for s1 with a pending event.
+    worker = sup._workers["s1"]
+    assert worker._queue.qsize() == 1
+    await sup.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_reply_to_dead_session_rejects(reg: Registry) -> None:
+    reg.upsert_session("s1", "/x", "main", "3", agent="claude", slack_channel="C-CLAUDE")
+    reg.set_name("s1", "p")
+    reg.set_thread_ts("s1", "TOP.1")
+    slack = FakeSlack()
+    sup = Supervisor(reg=reg, slack=slack, actuator=_NoopActuator())
+    router = ReplyRouter(reg=reg, supervisor=sup, liveness=_alive_cache(False), slack=slack)
+    await router.on_reply(channel="C-CLAUDE", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
+    assert any("No running CC process" in t for _, t in slack.thread_posts)
+    assert ("MSG.1", "no_entry_sign") in slack.reacts
+    sess = reg.get_session("s1")
+    assert sess is not None and sess.status == "ended"
+    await sup.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_reply_for_unknown_thread_ignored(reg: Registry) -> None:
-    actuator = FakeActuator()
-    slack = FakeSlackIO()
-    router = ReplyRouter(reg, actuator, slack)
-    await router.on_reply(channel="C1", thread_ts="UNKNOWN", text="x", msg_ts="MSG.1")
-    assert actuator.deliveries == []
+    slack = FakeSlack()
+    sup = Supervisor(reg=reg, slack=slack, actuator=_NoopActuator())
+    router = ReplyRouter(reg=reg, supervisor=sup, liveness=_alive_cache(True), slack=slack)
+    await router.on_reply(channel="C-CLAUDE", thread_ts="UNKNOWN", text="x", msg_ts="MSG.1")
+    assert slack.thread_posts == []
     assert slack.reacts == []
-
-
-@pytest.mark.asyncio
-async def test_reply_to_ended_session_posts_offline_warning(reg: Registry) -> None:
-    reg.upsert_session("s1", "/x", "main", "3")
-    reg.set_name("s1", "p")
-    reg.set_thread_ts("s1", "TOP.1")
-    reg.set_status("s1", "ended")
-    actuator = FakeActuator()
-    slack = FakeSlackIO()
-    router = ReplyRouter(reg, actuator, slack)
-    await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
-    assert actuator.deliveries == []
-    assert any("offline" in t for _, t in slack.thread_posts)
-    assert ("MSG.1", "no_entry_sign") in slack.reacts
-
-
-@pytest.mark.asyncio
-async def test_reply_failure_posts_error_and_reacts_warn(reg: Registry) -> None:
-    reg.upsert_session("s1", "/x", "main", "3")
-    reg.set_name("s1", "p")
-    reg.set_thread_ts("s1", "TOP.1")
-    actuator = FakeActuator(fail=True)
-    slack = FakeSlackIO()
-    router = ReplyRouter(reg, actuator, slack)
-    await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
-    assert any("delivery failed" in t for _, t in slack.thread_posts)
-    assert ("MSG.1", "warning") in slack.reacts
-
-
-@pytest.mark.asyncio
-async def test_reply_to_truly_dead_session_warns_and_marks_ended(reg: Registry) -> None:
-    """When no CC process can be found, refuse delivery and mark ended."""
-    reg.upsert_session("s1", "/x", "main", "3", cc_pid=99999)
-    reg.set_name("s1", "Finance")
-    reg.set_thread_ts("s1", "TOP.1")
-    actuator = FakeActuator()
-    slack = FakeSlackIO()
-    router = ReplyRouter(reg, actuator, slack, alive_fn=lambda _sid, _pid, _name: False)
-    await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
-    assert actuator.deliveries == []
-    assert any("No running CC process" in t for _, t in slack.thread_posts)
-    assert any("auto-rebind" in t for _, t in slack.thread_posts)
-    assert ("MSG.1", "no_entry_sign") in slack.reacts
-    sess = reg.get_session("s1")
-    assert sess is not None and sess.status == "ended"
-
-
-@pytest.mark.asyncio
-async def test_reply_when_session_id_in_cmdline_delivers(reg: Registry) -> None:
-    """Even with a dead recorded pid, finding the session_id in /proc cmdline
-    proves the session is alive — deliver."""
-    reg.upsert_session("s1", "/x", "main", "3", cc_pid=99999)  # dead pid
-    reg.set_name("s1", "p")
-    reg.set_thread_ts("s1", "TOP.1")
-    actuator = FakeActuator()
-    slack = FakeSlackIO()
-    # alive_fn says alive because session_id was found in cmdline.
-    router = ReplyRouter(reg, actuator, slack, alive_fn=lambda _sid, _pid, _name: True)
-    await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
-    assert actuator.deliveries == [("main", "3", "x")]
-
-
-@pytest.mark.asyncio
-async def test_reply_to_idle_session_still_delivers(reg: Registry) -> None:
-    """Idle-for-days is not 'dead' — only the alive_fn decides."""
-    reg.upsert_session("s1", "/x", "main", "3", cc_pid=12345)
-    reg.set_name("s1", "p")
-    reg.set_thread_ts("s1", "TOP.1")
-    reg._c().execute(
-        "UPDATE sessions SET last_event_at = ? WHERE cc_session_id = ?",
-        (int(time.time()) - 48 * 3600, "s1"),
-    )
-    actuator = FakeActuator()
-    slack = FakeSlackIO()
-    router = ReplyRouter(reg, actuator, slack, alive_fn=lambda _sid, _pid, _name: True)
-    await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
-    assert actuator.deliveries == [("main", "3", "x")]
-
-
-@pytest.mark.asyncio
-async def test_alive_check_receives_session_name(reg: Registry) -> None:
-    """name must be passed to the alive_fn so it can grep for `--resume <name>`."""
-    reg.upsert_session("s1", "/x", "main", "3")
-    reg.set_name("s1", "babydev")
-    reg.set_thread_ts("s1", "TOP.1")
-    seen: list[tuple] = []
-
-    def spy(sid, pid, name):
-        seen.append((sid, pid, name))
-        return True
-
-    router = ReplyRouter(reg, FakeActuator(), FakeSlackIO(), alive_fn=spy)
-    await router.on_reply(channel="C1", thread_ts="TOP.1", text="x", msg_ts="MSG.1")
-    assert seen == [("s1", None, "babydev")]
+    await sup.shutdown()
