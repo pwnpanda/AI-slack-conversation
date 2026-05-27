@@ -4,12 +4,13 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 EnvironmentFile=%h/.config/claude-slack-bot/env
 WorkingDirectory=%h/git/priv/claude-slack-bot
 ExecStart=%h/git/priv/claude-slack-bot/.venv/bin/python -m slackbot
 Restart=always
 RestartSec=3
+WatchdogSec=600
 StandardOutput=journal
 StandardError=journal
 
