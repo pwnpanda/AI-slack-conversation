@@ -161,6 +161,32 @@ journalctl --user -u claude-slack-bot -f
 - Verbose mode posting individual tool calls
 - Truncation-with-link for very long responses
 
+## Worker redesign (2026-05-27)
+
+The daemon now uses a worker-per-conversation model. Each `cc_session_id` owns
+an asyncio Task + Queue + per-worker uuid-dedup set. A `TranscriptReader`
+tails the JSONL file CC writes; new user/assistant messages flow into the
+worker, which decides whether to mirror them to Slack (skipping uuids
+already posted, suppressing echoes from Slack-driven deliveries).
+
+A `ReplyRouter` enqueues incoming Slack thread replies into the matching
+worker. The global `ZellijActuator` still owns a single `asyncio.Lock` so the
+three-call `focus → write-chars → Enter` sequence is atomic across workers.
+
+`session_is_alive` is the only liveness gate. It scans `/proc/*/cmdline`
+for the session id (exact argv token) or `--resume <name>` (adjacent argv
+tokens), with a 10s TTL cache and the scan offloaded to `asyncio.to_thread`.
+The registry's `status` column is diagnostic only.
+
+systemd watchdog: the unit is `Type=notify`; daemon calls `sd_notify`
+on startup (`READY=1`), every 60s, and on every received Slack event.
+`WatchdogSec=600` so a hung daemon gets restarted within 10 minutes.
+
+After upgrading, restart your CC sessions once so the new `session_start.sh`
+runs and writes `transcript_path` into the registry. Existing rows without
+`transcript_path` keep working (the transcript reader isn't attached, but
+Slack replies still deliver and notifications still mirror).
+
 ## Claude Sessions
 
 | Session | Summary | Date |
