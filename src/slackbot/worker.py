@@ -50,10 +50,8 @@ class Worker:
         self._task: asyncio.Task[None] | None = None
         self._posted_uuids: list[str] = []  # FIFO bounded
         self._pending_echo: list[str] = []  # FIFO bounded
-        # The most recently posted notification message. Edited on the next
-        # transcript event (prompt/response) or Slack reply so users never see
-        # stale "please approve" prompts whose action already happened in the pane.
-        self._pending_notification: dict[str, str] | None = None
+        # Pending notification (for resolved-marker editing) is persisted in
+        # the registry, NOT in-memory — survives worker reap + daemon restart.
 
     async def start(self) -> None:
         if self._task is None or self._task.done():
@@ -123,13 +121,8 @@ class Worker:
         )
         evt_id = self._reg.buffer_event(self._sid, "notification", json.dumps(data))
         self._reg.mark_event_posted(evt_id, ts)
-        # Remember the message so we can mark it resolved when the next event
-        # arrives — turns a stale "please approve" into "approve [resolved]".
-        self._pending_notification = {
-            "ts": ts,
-            "channel": sess.slack_channel or "",
-            "text": text,
-        }
+        # Persist so the resolved-marker edit survives reaping + restart.
+        self._reg.set_pending_notification(self._sid, ts, text, sess.slack_channel)
 
     async def _on_error(self, ev: dict[str, Any]) -> None:
         await self._mark_pending_notification_resolved()
@@ -166,15 +159,14 @@ class Worker:
     async def _mark_pending_notification_resolved(self) -> None:
         """Edit the previously posted notification to indicate it's no longer
         pending — the user already answered in the pane (or here via reply)."""
-        pending = self._pending_notification
+        pending = self._reg.consume_pending_notification(self._sid)
         if pending is None:
             return
-        self._pending_notification = None
         try:
             await self._slack.edit_top_level(
                 pending["ts"],
                 pending["text"] + "\n_— resolved —_",
-                channel=pending["channel"] or None,
+                channel=(pending.get("channel") or None),
             )
         except Exception:
             log.exception("worker[%s] failed to mark notification resolved", self._sid)

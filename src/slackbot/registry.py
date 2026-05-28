@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   slack_thread_ts TEXT,
   cc_pid          INTEGER,
   transcript_path TEXT,
+  pending_notification TEXT,
   created_at      INTEGER NOT NULL,
   last_event_at   INTEGER NOT NULL,
   status          TEXT NOT NULL
@@ -90,6 +91,8 @@ class Registry:
             self._c().execute("ALTER TABLE sessions ADD COLUMN cc_pid INTEGER")
         if "transcript_path" not in columns:
             self._c().execute("ALTER TABLE sessions ADD COLUMN transcript_path TEXT")
+        if "pending_notification" not in columns:
+            self._c().execute("ALTER TABLE sessions ADD COLUMN pending_notification TEXT")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -212,6 +215,52 @@ class Registry:
             "UPDATE sessions SET slack_thread_ts = ? WHERE cc_session_id = ?",
             (thread_ts, cc_session_id),
         )
+
+    def set_pending_notification(
+        self,
+        cc_session_id: str,
+        ts: str,
+        text: str,
+        channel: str | None,
+    ) -> None:
+        """Persist the most recently posted notification so the resolved-marker
+        edit survives worker reap and daemon restart."""
+        import json as _json
+
+        payload = _json.dumps({"ts": ts, "text": text, "channel": channel or ""})
+        self._c().execute(
+            "UPDATE sessions SET pending_notification = ? WHERE cc_session_id = ?",
+            (payload, cc_session_id),
+        )
+
+    def consume_pending_notification(self, cc_session_id: str) -> dict[str, str] | None:
+        """Atomically read + clear the pending notification. Returns
+        {ts, text, channel} or None."""
+        import json as _json
+
+        conn = self._c()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT pending_notification FROM sessions WHERE cc_session_id = ?",
+                (cc_session_id,),
+            ).fetchone()
+            if row is None or row["pending_notification"] is None:
+                conn.execute("COMMIT")
+                return None
+            payload = row["pending_notification"]
+            conn.execute(
+                "UPDATE sessions SET pending_notification = NULL WHERE cc_session_id = ?",
+                (cc_session_id,),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        try:
+            return _json.loads(payload)
+        except (ValueError, TypeError):
+            return None
 
     def set_status(self, cc_session_id: str, status: str) -> None:
         self._c().execute(
