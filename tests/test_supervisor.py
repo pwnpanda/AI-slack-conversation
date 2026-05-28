@@ -63,6 +63,39 @@ async def test_reap_removes_idle_workers(tmp_db_path: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pump_with_silent_reader_does_not_block_reaping(tmp_db_path: str, tmp_path) -> None:
+    """A reader that yields no events must not refresh _last_touch — otherwise
+    a dead CC with an attached reader would never be reaped."""
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("s1", "/x", "main", "13")
+    clock = {"t": 1000.0}
+    sup = Supervisor(
+        reg=reg,
+        slack=_FakeSlack(),
+        actuator=_FakeActuator(),
+        idle_seconds=5,
+        clock=lambda: clock["t"],
+    )
+    await sup.get_or_create("s1")
+
+    # Attach a reader pointing at an empty transcript file — drain yields nothing.
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("")
+    sup.attach_reader("s1", str(transcript))
+
+    # Simulate ticks past the idle window while the reader stays silent.
+    for _ in range(15):
+        clock["t"] += 1.0
+        await sup.pump_readers()
+
+    await sup.reap_once()
+    assert "s1" not in sup._workers
+    await sup.shutdown()
+    reg.close()
+
+
+@pytest.mark.asyncio
 async def test_recent_activity_keeps_worker_alive(tmp_db_path: str) -> None:
     reg = Registry(tmp_db_path)
     reg.open()

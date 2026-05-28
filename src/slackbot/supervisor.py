@@ -68,8 +68,11 @@ class Supervisor:
         polling-shaped makes tests deterministic.
         """
         for sid, reader in list(self._readers.items()):
+            events = list(reader.drain())
+            if not events:
+                continue
             worker = await self.get_or_create(sid)
-            for event in reader.drain():
+            for event in events:
                 await worker.enqueue(event)
 
     async def reap_once(self) -> None:
