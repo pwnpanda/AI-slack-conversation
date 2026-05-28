@@ -120,8 +120,6 @@ class Worker:
         ts = await self._slack.post_in_thread(
             sess.slack_thread_ts, text, channel=sess.slack_channel
         )
-        evt_id = self._reg.buffer_event(self._sid, "notification", json.dumps(data))
-        self._reg.mark_event_posted(evt_id, ts)
         # Persist so the resolved-marker edit survives reaping + restart.
         self._reg.set_pending_notification(self._sid, ts, text, sess.slack_channel)
 
@@ -181,14 +179,9 @@ class Worker:
             self._reg.buffer_event(self._sid, kind, json.dumps({**data, "agent": sess.agent}))
             return
         text = format_event(kind, {**data, "agent": sess.agent})
-        ts = await self._slack.post_in_thread(
-            sess.slack_thread_ts, text, channel=sess.slack_channel
-        )
+        await self._slack.post_in_thread(sess.slack_thread_ts, text, channel=sess.slack_channel)
         if uuid:
             self._remember_uuid(uuid)
-        # Record posted for traceability.
-        evt_id = self._reg.buffer_event(self._sid, kind, json.dumps({**data, "agent": sess.agent}))
-        self._reg.mark_event_posted(evt_id, ts)
 
     def _remember_uuid(self, uuid: str) -> None:
         self._posted_uuids.append(uuid)
