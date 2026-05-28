@@ -115,6 +115,7 @@ class Worker:
         if sess.name is None or sess.slack_thread_ts is None:
             self._reg.buffer_event(self._sid, "notification", json.dumps(data))
             return
+        await self._mark_pending_notification_resolved()
         text = format_event("notification", data)
         ts = await self._slack.post_in_thread(
             sess.slack_thread_ts, text, channel=sess.slack_channel
