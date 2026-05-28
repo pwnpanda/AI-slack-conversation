@@ -187,6 +187,64 @@ runs and writes `transcript_path` into the registry. Existing rows without
 `transcript_path` keep working (the transcript reader isn't attached, but
 Slack replies still deliver and notifications still mirror).
 
+## Known Slack Socket Mode silent failure + our mitigation (2026-05-28)
+
+The slack-sdk Socket Mode client has a long-standing, well-documented bug: the
+WebSocket appears healthy (`is_connected()=True`, ping/pong flowing) but
+incoming events stop being dispatched to handlers. The user message is in the
+Slack channel; the bot never sees it.
+
+Root cause (per [slack-sdk #1379](https://github.com/slackapi/python-slack-sdk/issues/1379)):
+`SocketModeClient.is_connected()` returns True whenever `current_session` is
+not None, without verifying the underlying socket is viable. The auto-reconnect
+logic therefore never trips.
+
+Reported repeatedly upstream — see [bolt-python #952](https://github.com/slackapi/bolt-python/issues/952),
+[bolt-python #470](https://github.com/slackapi/bolt-python/issues/470),
+[bolt-python #445](https://github.com/slackapi/bolt-python/issues/445),
+[slack-sdk #1110](https://github.com/slackapi/python-slack-sdk/issues/1110),
+[slack-sdk #1065](https://github.com/slackapi/python-slack-sdk/issues/1065).
+
+**Mitigations we apply**:
+1. **`is_ping_pong_failing()` watchdog** every 60s — forces reconnect on
+   positive evidence the socket is stale.
+2. **`SlackPoller`** every 15s — calls `conversations.replies` for every
+   thread we track and replays any messages we haven't seen via `msg_ts`.
+   This is the slack-sdk-team-recommended workaround (external watchdog) and
+   the only one that catches the silent-event-drop case where the socket
+   technically still passes ping/pong.
+3. **systemd `WatchdogSec=600`** — last-resort reset if the whole daemon hangs.
+
+The poller's cost at ~20 named sessions × 4 polls/min = 80 API calls/min,
+within Slack's tier-3 rate limit (50+/min per method, with burst tolerance).
+
+If Socket Mode is healthy, the poller has nothing to do — every message has
+already been processed by Bolt's `on_message` and recorded in the shared
+`delivered_msg_ts` set; the poller's findings are deduped against it.
+
+## Planned migration: Matrix / Element (self-hosted on Proxmox)
+
+Slack's Socket Mode reliability has cost more engineering time than the rest of
+this project combined. The poller is a workable mitigation but it's a patch on
+a vendor bug we cannot fix. The planned escape hatch:
+
+- **Target**: Matrix server (Synapse or Conduit) running as an LXC container
+  on Proxmox, paired with Element on phone + desktop for the user side.
+- **Why Matrix over Signal / Nextcloud Talk**:
+  - Threads are first-class (replies are organized, like Slack).
+  - The bot SDK (`matrix-nio` for Python) is stable and well-maintained.
+  - Self-hosted: no rate limits, no zombie WebSockets, no app store gatekeeping.
+  - Reactions are first-class.
+  - Federation gives an upgrade path if we ever want multi-user.
+  - Mobile push notifications work without app-store-tier hurdles.
+- **Scope of the port**: only `slack_io.py`, `slack_poller.py`, and the Bolt
+  wiring in `__main__.py` are Slack-specific. The worker model, transcript
+  reader, registry, liveness check, and Zellij actuator are messaging-agnostic.
+  Estimated effort: 1-2 days for a working port.
+
+Trigger for the migration: if the poller fails to recover the bot within
+its 15s window more than once a week, port to Matrix.
+
 ## Claude Sessions
 
 | Session | Summary | Date |
