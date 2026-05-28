@@ -76,6 +76,10 @@ class Registry:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self._db_path, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
+        # WAL gives concurrent readers + a single writer without blocking, and
+        # busy_timeout makes transient locks retry instead of failing fast.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_SCHEMA)
         self._migrate()
 
@@ -93,6 +97,8 @@ class Registry:
             self._c().execute("ALTER TABLE sessions ADD COLUMN transcript_path TEXT")
         if "pending_notification" not in columns:
             self._c().execute("ALTER TABLE sessions ADD COLUMN pending_notification TEXT")
+        if "transcript_offset" not in columns:
+            self._c().execute("ALTER TABLE sessions ADD COLUMN transcript_offset INTEGER")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -373,6 +379,28 @@ class Registry:
             "UPDATE event_log SET slack_msg_ts = ? WHERE id = ?",
             (slack_msg_ts, event_id),
         )
+
+    def set_transcript_offset(self, cc_session_id: str, offset: int) -> None:
+        """Persist the current transcript byte offset so a daemon restart can
+        resume reading from the same point instead of snapping to EOF."""
+        self._c().execute(
+            "UPDATE sessions SET transcript_offset = ? WHERE cc_session_id = ?",
+            (offset, cc_session_id),
+        )
+
+    def get_transcript_offset(self, cc_session_id: str) -> int | None:
+        row = (
+            self._c()
+            .execute(
+                "SELECT transcript_offset FROM sessions WHERE cc_session_id = ?",
+                (cc_session_id,),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        value = row["transcript_offset"]
+        return int(value) if value is not None else None
 
     def refresh_liveness(
         self,

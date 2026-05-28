@@ -168,6 +168,30 @@ def test_refresh_liveness_does_not_flip_status(tmp_db_path: str) -> None:
     reg.close()
 
 
+def test_transcript_offset_round_trip(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("s1", "/x", "main", "3", transcript_path="/tmp/tx.jsonl")
+    # Initially unset.
+    assert reg.get_transcript_offset("s1") is None
+    reg.set_transcript_offset("s1", 1234)
+    assert reg.get_transcript_offset("s1") == 1234
+    reg.set_transcript_offset("s1", 5678)
+    assert reg.get_transcript_offset("s1") == 5678
+    reg.close()
+
+
+def test_open_sets_wal_and_busy_timeout(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    conn = reg._c()
+    journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert journal_mode.lower() == "wal"
+    assert busy_timeout == 5000
+    reg.close()
+
+
 def test_claim_name_is_atomic(tmp_db_path: str) -> None:
     """Two concurrent claims of the same name end with exactly one row owning it."""
     from slackbot.registry import Registry

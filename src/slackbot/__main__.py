@@ -155,7 +155,10 @@ async def amain() -> None:
     rows = reg.list_active_with_transcript()
     for row in rows:
         if row.transcript_path:
-            supervisor.attach_reader(row.cc_session_id, row.transcript_path)
+            start_offset = reg.get_transcript_offset(row.cc_session_id)
+            supervisor.attach_reader(
+                row.cc_session_id, row.transcript_path, start_offset=start_offset
+            )
             await supervisor.get_or_create(row.cc_session_id)
     if rows:
         log.info("re-attached %d transcript readers on startup", len(rows))

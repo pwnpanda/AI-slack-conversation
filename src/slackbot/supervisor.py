@@ -47,11 +47,19 @@ class Supervisor:
         if sid in self._workers:
             self._last_touch[sid] = self._clock()
 
-    def attach_reader(self, sid: str, transcript_path: str) -> None:
-        """Open a TranscriptReader for *sid* if one is not already attached."""
+    def attach_reader(
+        self, sid: str, transcript_path: str, start_offset: int | None = None
+    ) -> None:
+        """Open a TranscriptReader for *sid* if one is not already attached.
+
+        When *start_offset* is provided (daemon restart with a persisted
+        cursor), the reader resumes from that byte offset instead of snapping
+        to EOF, so prompts/responses CC wrote while the daemon was down are
+        replayed.
+        """
         if sid in self._readers:
             return
-        reader = TranscriptReader(Path(transcript_path))
+        reader = TranscriptReader(Path(transcript_path), start_offset=start_offset)
         reader.open()
         self._readers[sid] = reader
 
@@ -69,8 +77,14 @@ class Supervisor:
         """
         for sid, reader in list(self._readers.items()):
             worker = await self.get_or_create(sid)
+            had_events = False
             for event in reader.drain():
+                had_events = True
                 await worker.enqueue(event)
+            if had_events:
+                # Persist the cursor so a daemon restart can resume from here
+                # instead of snapping to EOF and silently dropping pending events.
+                self._reg.set_transcript_offset(sid, reader.offset)
 
     async def reap_once(self) -> None:
         """Stop and remove workers that have been idle past *idle_seconds*."""

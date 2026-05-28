@@ -10,7 +10,6 @@ def test_load_config_full_env(env_full: None) -> None:
     assert cfg.slack_channel_id == "C12345"
     assert cfg.channel_for_agent("claude") == "C12345"
     assert cfg.port == 0
-    assert cfg.verbose == "off"
     assert cfg.log_level == "WARNING"
 
 
@@ -37,10 +36,9 @@ def test_load_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_BOT_TOKEN", "x")
     monkeypatch.setenv("SLACK_APP_TOKEN", "x")
     monkeypatch.setenv("SLACK_CHANNEL_ID", "x")
-    for var in ("SLACKBOT_PORT", "CC_SLACK_VERBOSE", "LOG_LEVEL", "SLACKBOT_DB_PATH"):
+    for var in ("SLACKBOT_PORT", "LOG_LEVEL", "SLACKBOT_DB_PATH"):
         monkeypatch.delenv(var, raising=False)
     cfg = load_config()
     assert cfg.port == 8787
-    assert cfg.verbose == "off"
     assert cfg.log_level == "INFO"
     assert cfg.db_path.endswith("/claude-slack-bot/registry.db")

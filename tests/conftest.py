@@ -1,6 +1,5 @@
 """Shared pytest fixtures."""
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -18,6 +17,4 @@ def env_full(monkeypatch: pytest.MonkeyPatch, tmp_db_path: str) -> None:
     monkeypatch.setenv("SLACK_CHANNEL_ID", "C12345")
     monkeypatch.setenv("SLACKBOT_PORT", "0")
     monkeypatch.setenv("SLACKBOT_DB_PATH", tmp_db_path)
-    monkeypatch.setenv("SLACKBOT_TMP_DIR", tempfile.gettempdir())
-    monkeypatch.setenv("CC_SLACK_VERBOSE", "off")
     monkeypatch.setenv("LOG_LEVEL", "WARNING")

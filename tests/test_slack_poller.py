@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from slackbot.registry import Registry
-from slackbot.slack_poller import SlackPoller
+from slackbot.slack_poller import _RESTART_REPLAY_SECONDS, SlackPoller
 
 
 @dataclass
@@ -93,6 +93,24 @@ async def test_poller_skips_bot_and_subtype_messages(reg: Registry) -> None:
     await poller._poll_once()
     assert len(delivered) == 1
     assert delivered[0][2] == "real"
+
+
+def test_baseline_uses_restart_replay_window(reg: Registry) -> None:
+    """Baseline must be `now - _RESTART_REPLAY_SECONDS`, not `now`, so replies
+    delivered while the daemon was down still get picked up after restart."""
+    import time as t
+
+    reg.upsert_session("s1", "/x", "main", "3", slack_channel="C1")
+    reg.set_thread_ts("s1", "T.1")
+    poller = SlackPoller(reg, FakeWebClient(), lambda *a, **kw: None, interval_seconds=99)
+    before = t.time()
+    poller.baseline_now()
+    after = t.time()
+    cursor = poller._seen_after["T.1"]
+    # Cursor sits in the window [before - replay, after - replay].
+    assert before - _RESTART_REPLAY_SECONDS <= cursor <= after - _RESTART_REPLAY_SECONDS
+    # And it is meaningfully earlier than "now" — at least replay - 1s.
+    assert (after - cursor) >= _RESTART_REPLAY_SECONDS - 1.0
 
 
 @pytest.mark.asyncio
