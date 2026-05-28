@@ -25,6 +25,11 @@ log = logging.getLogger(__name__)
 
 DeliverFn = Callable[[str, str, str, str], Awaitable[None]]
 
+# On daemon restart, look this far back when initializing per-thread cursors.
+# Any replies Slack received while the daemon was down inside this window will
+# be replayed; the outer delivery path de-dupes by msg_ts so this is safe.
+_RESTART_REPLAY_SECONDS = 300.0
+
 
 class _WebClientProto(Protocol):
     async def conversations_replies(self, **kwargs: object) -> dict: ...
@@ -47,11 +52,18 @@ class SlackPoller:
         self._seen_after: dict[str, float] = {}
 
     def baseline_now(self) -> None:
-        """Skip any messages older than this moment. Call once at startup."""
-        now = time.time()
+        """Initialize per-thread cursors at startup.
+
+        Baseline is `now - _RESTART_REPLAY_SECONDS` rather than `now` so that
+        replies Slack delivered while the daemon was down (inside the replay
+        window) still get picked up. The dedupe set in the delivery callback
+        suppresses anything Bolt also delivered, so the redundant work is
+        bounded and safe.
+        """
+        baseline = time.time() - _RESTART_REPLAY_SECONDS
         for sess in self._reg.list_threads():
             if sess.slack_thread_ts:
-                self._seen_after[sess.slack_thread_ts] = now
+                self._seen_after[sess.slack_thread_ts] = baseline
 
     async def run(self) -> None:
         self.baseline_now()
