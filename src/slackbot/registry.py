@@ -152,6 +152,18 @@ class Registry:
         )
         return _row_to_session(row) if row else None
 
+    def list_threads(self) -> list[Session]:
+        """Return all sessions that have a Slack thread bound — used by the
+        web-API fallback poller to know which threads to poll."""
+        rows = (
+            self._c()
+            .execute(
+                "SELECT * FROM sessions WHERE slack_thread_ts IS NOT NULL"
+            )
+            .fetchall()
+        )
+        return [_row_to_session(r) for r in rows]
+
     def list_active_with_transcript(self) -> list[Session]:
         """Return active sessions whose transcript_path is recorded.
 

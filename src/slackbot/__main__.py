@@ -21,6 +21,7 @@ from slackbot.registry import Registry
 from slackbot.reply_router import ReplyRouter
 from slackbot.server import make_app
 from slackbot.slack_io import SlackIO
+from slackbot.slack_poller import SlackPoller
 from slackbot.supervisor import Supervisor
 from slackbot.zellij_io import ZellijActuator
 
@@ -104,6 +105,30 @@ async def amain() -> None:
     bolt = AsyncApp(token=cfg.slack_bot_token, client=web_client)
     loop = asyncio.get_running_loop()
 
+    # Bolt's on_message AND the poller both call this. Dedupe by Slack's msg_ts
+    # so a message delivered via both paths only gets actuated once.
+    delivered_msg_ts: set[str] = set()
+    _DEDUPE_CAP = 4096
+
+    async def handle_thread_reply(
+        channel: str, thread_ts: str, text: str, msg_ts: str
+    ) -> None:
+        if msg_ts in delivered_msg_ts:
+            return
+        delivered_msg_ts.add(msg_ts)
+        # Bounded LRU-ish: drop arbitrary half when cap exceeded.
+        if len(delivered_msg_ts) > _DEDUPE_CAP:
+            for x in list(delivered_msg_ts)[: _DEDUPE_CAP // 2]:
+                delivered_msg_ts.discard(x)
+        log.info(
+            "thread reply received: channel=%s thread_ts=%s msg_ts=%s len=%d",
+            channel,
+            thread_ts,
+            msg_ts,
+            len(text),
+        )
+        await router.on_reply(channel=channel, thread_ts=thread_ts, text=text, msg_ts=msg_ts)
+
     @bolt.event("message")
     async def on_message(event, logger):
         sd_notify.watchdog()
@@ -115,14 +140,7 @@ async def amain() -> None:
         text = event.get("text", "")
         msg_ts = event.get("ts", "")
         channel = event.get("channel", "")
-        log.info(
-            "thread reply received: channel=%s thread_ts=%s msg_ts=%s len=%d",
-            channel,
-            thread_ts,
-            msg_ts,
-            len(text),
-        )
-        await router.on_reply(channel=channel, thread_ts=thread_ts, text=text, msg_ts=msg_ts)
+        await handle_thread_reply(channel, thread_ts, text, msg_ts)
 
     socket_handler = AsyncSocketModeHandler(bolt, cfg.slack_app_token)
     http_app = make_app(handlers)
@@ -156,6 +174,13 @@ async def amain() -> None:
     tasks.append(asyncio.create_task(reaper(supervisor)))
     tasks.append(asyncio.create_task(watchdog_heartbeat()))
     tasks.append(asyncio.create_task(socket_health_watchdog(socket_handler)))
+    poller = SlackPoller(
+        reg=reg,
+        client=web_client,
+        deliver=handle_thread_reply,
+        interval_seconds=15.0,
+    )
+    tasks.append(asyncio.create_task(poller.run()))
 
     try:
         await stop_event.wait()
