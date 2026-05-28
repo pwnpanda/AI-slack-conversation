@@ -149,6 +149,78 @@ def test_reader_survives_file_truncation(tmp_path: Path) -> None:
     reader.close()
 
 
+def test_reader_with_start_offset_reads_from_there(tmp_path: Path) -> None:
+    """A reader constructed with start_offset resumes from that byte position
+    instead of snapping to EOF, so events written before the reader opened are
+    still delivered."""
+    p = tmp_path / "tx.jsonl"
+    p.write_text("")
+    _append(
+        p,
+        {
+            "type": "user",
+            "uuid": "u1",
+            "parentUuid": None,
+            "message": {"role": "user", "content": "first"},
+        },
+    )
+    offset_before_second = p.stat().st_size
+    _append(
+        p,
+        {
+            "type": "user",
+            "uuid": "u2",
+            "parentUuid": None,
+            "message": {"role": "user", "content": "second"},
+        },
+    )
+
+    reader = TranscriptReader(p, start_offset=offset_before_second)
+    reader.open()
+    events = list(reader.drain())
+    assert [e["uuid"] for e in events] == ["u2"]
+    reader.close()
+
+
+def test_reader_offset_round_trip_preserves_position(tmp_path: Path) -> None:
+    """Persisting reader.offset and re-opening with start_offset resumes at
+    the same point — no duplicate events, no dropped events."""
+    p = tmp_path / "tx.jsonl"
+    p.write_text("")
+    reader = TranscriptReader(p)
+    reader.open()
+    _append(
+        p,
+        {
+            "type": "user",
+            "uuid": "u1",
+            "parentUuid": None,
+            "message": {"role": "user", "content": "first"},
+        },
+    )
+    list(reader.drain())
+    saved_offset = reader.offset
+    reader.close()
+
+    # Simulate daemon down: append another event while no reader is attached.
+    _append(
+        p,
+        {
+            "type": "user",
+            "uuid": "u2",
+            "parentUuid": None,
+            "message": {"role": "user", "content": "second"},
+        },
+    )
+
+    # Re-open from the saved offset; u1 must not be re-delivered, u2 must arrive.
+    resumed = TranscriptReader(p, start_offset=saved_offset)
+    resumed.open()
+    events = list(resumed.drain())
+    assert [e["uuid"] for e in events] == ["u2"]
+    resumed.close()
+
+
 def test_reader_handles_string_content_legacy(tmp_path: Path) -> None:
     """Older transcripts stored content as plain string instead of array of blocks."""
     p = tmp_path / "tx.jsonl"

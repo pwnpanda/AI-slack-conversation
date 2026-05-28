@@ -36,19 +36,30 @@ _FINGERPRINT_BYTES = 64
 class TranscriptReader:
     """Tail a JSONL file. Holds a byte offset and yields parsed events on drain()."""
 
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, start_offset: int | None = None) -> None:
         self._path = Path(path)
         self._offset = 0
         self._fingerprint: bytes = b""
         self._buffer = b""
+        self._start_offset = start_offset
+
+    @property
+    def offset(self) -> int:
+        """Current byte offset into the transcript file."""
+        return self._offset
 
     def open(self) -> None:
-        # Start from current EOF: we want events appended after we register, not history.
-        # Tests that create empty files start at 0; production sessions register on
-        # SessionStart, before CC writes its first message.
+        # Default: start from current EOF (we want events appended after we
+        # register, not history). When a start_offset is provided (daemon
+        # restart with a persisted cursor), seek to that point instead so we
+        # replay anything CC wrote while the daemon was down.
         try:
             st = self._path.stat()
-            self._offset = st.st_size
+            if self._start_offset is not None:
+                # Clamp to file size so a stale, oversized offset doesn't read past EOF.
+                self._offset = min(self._start_offset, st.st_size)
+            else:
+                self._offset = st.st_size
             self._fingerprint = self._read_fingerprint()
         except FileNotFoundError:
             self._offset = 0
