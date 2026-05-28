@@ -239,6 +239,41 @@ async def test_notification_is_marked_resolved_on_slack_reply(tmp_db_path: str) 
 
 
 @pytest.mark.asyncio
+async def test_back_to_back_notifications_resolve_previous(tmp_db_path: str) -> None:
+    """When a second notification arrives, the first must be marked resolved
+    and the second becomes the new pending row."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    slack = FakeSlackIO()
+    worker = Worker(sid="s1", reg=reg, slack=slack, actuator=FakeActuator())
+    await worker.start()
+
+    await worker.enqueue({"kind": "notification", "message": "first?"})
+    await worker.enqueue({"kind": "notification", "message": "second?"})
+    await worker.stop()
+
+    # Two notifications posted, the first one edited as resolved.
+    assert len(slack.posts) == 2
+    first_ts = "thr.1"
+    second_ts = "thr.2"
+    assert len(slack.edits) == 1
+    edited_ts, edited_text = slack.edits[0]
+    assert edited_ts == first_ts
+    assert "resolved" in edited_text
+    assert "first?" in edited_text
+
+    # The second notification is now the pending one.
+    pending = reg.consume_pending_notification("s1")
+    assert pending is not None
+    assert pending["ts"] == second_ts
+    assert "second?" in pending["text"]
+    reg.close()
+
+
+@pytest.mark.asyncio
 async def test_no_pending_notification_is_a_noop(tmp_db_path: str) -> None:
     """A prompt without a preceding notification should not call edit."""
     from slackbot.registry import Registry

@@ -76,15 +76,15 @@ class Supervisor:
         polling-shaped makes tests deterministic.
         """
         for sid, reader in list(self._readers.items()):
+            events = list(reader.drain())
+            if not events:
+                continue
             worker = await self.get_or_create(sid)
-            had_events = False
-            for event in reader.drain():
-                had_events = True
+            for event in events:
                 await worker.enqueue(event)
-            if had_events:
-                # Persist the cursor so a daemon restart can resume from here
-                # instead of snapping to EOF and silently dropping pending events.
-                self._reg.set_transcript_offset(sid, reader.offset)
+            # Persist the cursor so a daemon restart can resume from here
+            # instead of snapping to EOF and silently dropping pending events.
+            self._reg.set_transcript_offset(sid, reader.offset)
 
     async def reap_once(self) -> None:
         """Stop and remove workers that have been idle past *idle_seconds*."""
