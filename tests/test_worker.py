@@ -10,6 +10,7 @@ class FakeSlackIO:
     posts: list[tuple[str, str]] = field(default_factory=list)
     reacts: list[tuple[str, str]] = field(default_factory=list)
     top_level_posts: list[str] = field(default_factory=list)
+    edits: list[tuple[str, str]] = field(default_factory=list)
     _ts: int = 0
 
     def channel_for_agent(self, agent: str) -> str:
@@ -26,7 +27,7 @@ class FakeSlackIO:
         return f"top.{self._ts}"
 
     async def edit_top_level(self, ts, text, channel=None):
-        pass
+        self.edits.append((ts, text))
 
     async def react(self, ts, emoji, channel=None):
         self.reacts.append((ts, emoji))
@@ -164,4 +165,93 @@ async def test_worker_skips_unbound_session(tmp_db_path: str) -> None:
 
     # No thread yet → no Slack post. Event log holds it for replay.
     assert slack.posts == []
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_notification_is_marked_resolved_on_next_prompt(tmp_db_path: str) -> None:
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    slack = FakeSlackIO()
+    worker = Worker(sid="s1", reg=reg, slack=slack, actuator=FakeActuator())
+    await worker.start()
+
+    await worker.enqueue(
+        {
+            "kind": "notification",
+            "message": "Claude waiting",
+            "tool_request": 'Bash({"command":"ls"})',
+        }
+    )
+    await worker.enqueue({"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "go ahead"})
+    await worker.stop()
+
+    # We posted the notification, then the prompt, then EDITED the notification.
+    assert len(slack.posts) == 2  # notification + prompt
+    assert len(slack.edits) == 1
+    edited_ts, edited_text = slack.edits[0]
+    assert "resolved" in edited_text
+    assert "Claude waiting" in edited_text
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_notification_is_marked_resolved_on_response(tmp_db_path: str) -> None:
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    slack = FakeSlackIO()
+    worker = Worker(sid="s1", reg=reg, slack=slack, actuator=FakeActuator())
+    await worker.start()
+
+    await worker.enqueue({"kind": "notification", "message": "needs input"})
+    await worker.enqueue({"kind": "response", "uuid": "a1", "parentUuid": "u1", "text": "done"})
+    await worker.stop()
+
+    assert len(slack.edits) == 1
+    assert "resolved" in slack.edits[0][1]
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_notification_is_marked_resolved_on_slack_reply(tmp_db_path: str) -> None:
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    slack = FakeSlackIO()
+    worker = Worker(sid="s1", reg=reg, slack=slack, actuator=FakeActuator())
+    await worker.start()
+
+    await worker.enqueue({"kind": "notification", "message": "approve?"})
+    await worker.enqueue({"kind": "slack_reply", "text": "1", "msg_ts": "MSG.1"})
+    await worker.stop()
+
+    assert len(slack.edits) == 1
+    assert "resolved" in slack.edits[0][1]
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_no_pending_notification_is_a_noop(tmp_db_path: str) -> None:
+    """A prompt without a preceding notification should not call edit."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    slack = FakeSlackIO()
+    worker = Worker(sid="s1", reg=reg, slack=slack, actuator=FakeActuator())
+    await worker.start()
+
+    await worker.enqueue({"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "hi"})
+    await worker.stop()
+
+    assert slack.edits == []
     reg.close()

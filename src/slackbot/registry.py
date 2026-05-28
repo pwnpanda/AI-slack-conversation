@@ -156,11 +156,7 @@ class Registry:
         """Return all sessions that have a Slack thread bound — used by the
         web-API fallback poller to know which threads to poll."""
         rows = (
-            self._c()
-            .execute(
-                "SELECT * FROM sessions WHERE slack_thread_ts IS NOT NULL"
-            )
-            .fetchall()
+            self._c().execute("SELECT * FROM sessions WHERE slack_thread_ts IS NOT NULL").fetchall()
         )
         return [_row_to_session(r) for r in rows]
 

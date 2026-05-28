@@ -110,9 +110,7 @@ async def amain() -> None:
     delivered_msg_ts: set[str] = set()
     _DEDUPE_CAP = 4096
 
-    async def handle_thread_reply(
-        channel: str, thread_ts: str, text: str, msg_ts: str
-    ) -> None:
+    async def handle_thread_reply(channel: str, thread_ts: str, text: str, msg_ts: str) -> None:
         if msg_ts in delivered_msg_ts:
             return
         delivered_msg_ts.add(msg_ts)

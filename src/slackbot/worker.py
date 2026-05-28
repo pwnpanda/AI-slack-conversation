@@ -50,6 +50,10 @@ class Worker:
         self._task: asyncio.Task[None] | None = None
         self._posted_uuids: list[str] = []  # FIFO bounded
         self._pending_echo: list[str] = []  # FIFO bounded
+        # The most recently posted notification message. Edited on the next
+        # transcript event (prompt/response) or Slack reply so users never see
+        # stale "please approve" prompts whose action already happened in the pane.
+        self._pending_notification: dict[str, str] | None = None
 
     async def start(self) -> None:
         if self._task is None or self._task.done():
@@ -90,23 +94,45 @@ class Worker:
             self._pending_echo.remove(text)
             log.debug("worker[%s] echo suppressed: %r", self._sid, text)
             return
+        await self._mark_pending_notification_resolved()
         await self._mirror("prompt", {"text": text}, ev.get("uuid"))
 
     async def _on_response(self, ev: dict[str, Any]) -> None:
         uuid = ev.get("uuid")
         if uuid in self._posted_uuids:
             return
+        await self._mark_pending_notification_resolved()
         await self._mirror("response", {"text": ev.get("text", "")}, uuid)
 
     async def _on_notification(self, ev: dict[str, Any]) -> None:
+        sess = self._reg.get_session(self._sid)
+        if sess is None:
+            return
         data = {
             "message": ev.get("message", ""),
             "tool_request": ev.get("tool_request", ""),
             "context": ev.get("context", ""),
+            "agent": sess.agent,
         }
-        await self._mirror("notification", data, uuid=None)
+        if sess.name is None or sess.slack_thread_ts is None:
+            self._reg.buffer_event(self._sid, "notification", json.dumps(data))
+            return
+        text = format_event("notification", data)
+        ts = await self._slack.post_in_thread(
+            sess.slack_thread_ts, text, channel=sess.slack_channel
+        )
+        evt_id = self._reg.buffer_event(self._sid, "notification", json.dumps(data))
+        self._reg.mark_event_posted(evt_id, ts)
+        # Remember the message so we can mark it resolved when the next event
+        # arrives — turns a stale "please approve" into "approve [resolved]".
+        self._pending_notification = {
+            "ts": ts,
+            "channel": sess.slack_channel or "",
+            "text": text,
+        }
 
     async def _on_error(self, ev: dict[str, Any]) -> None:
+        await self._mark_pending_notification_resolved()
         await self._mirror("error", {"text": ev.get("text", "")}, uuid=None)
 
     async def _on_slack_reply(self, ev: dict[str, Any]) -> None:
@@ -134,7 +160,24 @@ class Worker:
             await self._slack.react(msg_ts, "warning", channel=channel)
             return
         self._remember_echo(text)
+        await self._mark_pending_notification_resolved()
         await self._slack.react(msg_ts, "white_check_mark", channel=channel)
+
+    async def _mark_pending_notification_resolved(self) -> None:
+        """Edit the previously posted notification to indicate it's no longer
+        pending — the user already answered in the pane (or here via reply)."""
+        pending = self._pending_notification
+        if pending is None:
+            return
+        self._pending_notification = None
+        try:
+            await self._slack.edit_top_level(
+                pending["ts"],
+                pending["text"] + "\n_— resolved —_",
+                channel=pending["channel"] or None,
+            )
+        except Exception:
+            log.exception("worker[%s] failed to mark notification resolved", self._sid)
 
     async def _mirror(self, kind: str, data: dict[str, Any], uuid: str | None) -> None:
         sess = self._reg.get_session(self._sid)
