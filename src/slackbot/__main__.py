@@ -14,9 +14,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from slackbot import sd_notify
 from slackbot.config import load_config
 from slackbot.handlers import EventHandlers
-from slackbot.liveness_cache import LivenessCache
 from slackbot.logging_setup import configure as configure_logging
-from slackbot.process_liveness import session_is_alive
 from slackbot.registry import Registry
 from slackbot.reply_router import ReplyRouter
 from slackbot.server import make_app
@@ -99,9 +97,8 @@ async def amain() -> None:
     slack_io = SlackIO(web_client, cfg.slack_channel_id, cfg.agent_channels)
     actuator = ZellijActuator()
     supervisor = Supervisor(reg=reg, slack=slack_io, actuator=actuator)
-    liveness = LivenessCache(session_is_alive)
     handlers = EventHandlers(reg, supervisor, slack_io)
-    router = ReplyRouter(reg=reg, supervisor=supervisor, liveness=liveness, slack=slack_io)
+    router = ReplyRouter(reg=reg, supervisor=supervisor, slack=slack_io)
     commands = SlackCommandHandler(
         reg=reg,
         slack=slack_io,
