@@ -87,14 +87,22 @@ class Supervisor:
             self._reg.set_transcript_offset(sid, reader.offset)
 
     async def reap_once(self) -> None:
-        """Stop and remove workers that have been idle past *idle_seconds*."""
+        """Stop and remove workers that have been idle past *idle_seconds*.
+
+        Workers with an attached transcript reader are never reaped: the
+        reader is what marks the session as "still being watched". A quiet
+        CC session produces no transcript events but is still alive, and
+        reaping it here would orphan subsequent prompts and responses.
+        Readers are detached by `_on_end` (session_end hook) or shutdown.
+        """
         now = self._clock()
         for sid in list(self._workers.keys()):
+            if sid in self._readers:
+                continue
             last = self._last_touch.get(sid, now)
             if now - last >= self._idle:
                 worker = self._workers.pop(sid)
                 self._last_touch.pop(sid, None)
-                self.detach_reader(sid)
                 await worker.stop()
                 log.info("reaped idle worker %s", sid)
 
