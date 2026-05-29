@@ -10,29 +10,29 @@ from slackbot.supervisor import Supervisor
 
 
 @dataclass
-class FakeSlack:
+class FakeMatrix:
     posts: list[tuple[str, str]] = field(default_factory=list)
     top_level: list[str] = field(default_factory=list)
     reacts: list[tuple[str, str]] = field(default_factory=list)
-    _ts: int = 0
+    _seq: int = 0
 
-    def channel_for_agent(self, agent):
-        return f"C-{agent.upper()}"
+    def room_for_agent(self, agent):
+        return f"!{agent}:server"
 
-    async def post_top_level(self, text, channel=None):
+    async def post_top_level(self, text, room_id=None):
         self.top_level.append(text)
-        self._ts += 1
-        return f"top.{self._ts}"
+        self._seq += 1
+        return f"$top.{self._seq}"
 
-    async def post_in_thread(self, thread_ts, text, channel=None):
-        self.posts.append((thread_ts, text))
-        self._ts += 1
-        return f"thr.{self._ts}"
+    async def post_in_thread(self, thread_root, text, room_id=None):
+        self.posts.append((thread_root, text))
+        self._seq += 1
+        return f"$thr.{self._seq}"
 
-    async def edit_top_level(self, ts, text, channel=None):
+    async def edit_top_level(self, ts, text, room_id=None):
         pass
 
-    async def react(self, ts, emoji, channel=None):
+    async def react(self, ts, emoji, room_id=None):
         self.reacts.append((ts, emoji))
 
 
@@ -57,14 +57,14 @@ async def test_full_turn_mirrored_via_transcript(tmp_path: Path, tmp_db_path: st
         "main",
         "13",
         agent="claude",
-        slack_channel="C-CLAUDE",
+        matrix_room_id="!claude:server",
         transcript_path=str(transcript),
     )
     reg.set_name("s1", "myproj")
-    reg.set_thread_ts("s1", "TOP.1")
+    reg.set_matrix_thread_root("s1", "$TOP1:server")
 
-    slack = FakeSlack()
-    sup = Supervisor(reg=reg, slack=slack, actuator=FakeActuator())
+    matrix = FakeMatrix()
+    sup = Supervisor(reg=reg, matrix=matrix, actuator=FakeActuator())
     sup.attach_reader("s1", str(transcript))
     await sup.get_or_create("s1")
 
@@ -102,14 +102,14 @@ async def test_full_turn_mirrored_via_transcript(tmp_path: Path, tmp_db_path: st
     await sup.shutdown()
 
     # Both messages mirrored exactly once into the bound thread.
-    assert ("TOP.1", "[Claude] 👤 hi") in slack.posts
-    assert ("TOP.1", "[Claude] 🤖 hello back") in slack.posts
-    assert len(slack.posts) == 2
+    assert ("$TOP1:server", "[Claude] 👤 hi") in matrix.posts
+    assert ("$TOP1:server", "[Claude] 🤖 hello back") in matrix.posts
+    assert len(matrix.posts) == 2
     reg.close()
 
 
 @pytest.mark.asyncio
-async def test_slack_reply_delivers_and_suppresses_echo(tmp_path: Path, tmp_db_path: str) -> None:
+async def test_matrix_reply_delivers_and_suppresses_echo(tmp_path: Path, tmp_db_path: str) -> None:
     transcript = tmp_path / "tx.jsonl"
     transcript.write_text("")
     reg = Registry(tmp_db_path)
@@ -120,20 +120,20 @@ async def test_slack_reply_delivers_and_suppresses_echo(tmp_path: Path, tmp_db_p
         "main",
         "13",
         agent="claude",
-        slack_channel="C-CLAUDE",
+        matrix_room_id="!claude:server",
         transcript_path=str(transcript),
     )
     reg.set_name("s1", "myproj")
-    reg.set_thread_ts("s1", "TOP.1")
+    reg.set_matrix_thread_root("s1", "$TOP1:server")
 
-    slack = FakeSlack()
+    matrix = FakeMatrix()
     actuator = FakeActuator()
-    sup = Supervisor(reg=reg, slack=slack, actuator=actuator)
+    sup = Supervisor(reg=reg, matrix=matrix, actuator=actuator)
     sup.attach_reader("s1", str(transcript))
     worker = await sup.get_or_create("s1")
 
-    # Slack reply: should deliver to pane and queue an echo suppression.
-    await worker.enqueue({"kind": "slack_reply", "text": "ping", "msg_ts": "MSG.1"})
+    # Matrix reply: should deliver to pane and queue an echo suppression.
+    await worker.enqueue({"kind": "matrix_reply", "text": "ping", "msg_ts": "$MSG1:server"})
     # Transcript writes the user message a moment later (CC accepted the typed text).
     with transcript.open("a") as f:
         f.write(
@@ -153,7 +153,7 @@ async def test_slack_reply_delivers_and_suppresses_echo(tmp_path: Path, tmp_db_p
     await sup.shutdown()
 
     assert actuator.deliveries == [("main", "13", "ping")]
-    assert ("MSG.1", "white_check_mark") in slack.reacts
-    # The echoed user message must NOT have been mirrored back into Slack.
-    assert slack.posts == []
+    assert ("$MSG1:server", "white_check_mark") in matrix.reacts
+    # The echoed user message must NOT have been mirrored back into Matrix.
+    assert matrix.posts == []
     reg.close()

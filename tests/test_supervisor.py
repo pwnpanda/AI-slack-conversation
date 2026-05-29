@@ -4,20 +4,20 @@ from slackbot.registry import Registry
 from slackbot.supervisor import Supervisor
 
 
-class _FakeSlack:
-    def channel_for_agent(self, agent):
-        return f"C-{agent.upper()}"
+class _FakeMatrix:
+    def room_for_agent(self, agent):
+        return f"!{agent}:server"
 
-    async def post_top_level(self, text, channel=None):
-        return "top.1"
+    async def post_top_level(self, text, room_id=None):
+        return "$top.1"
 
-    async def post_in_thread(self, thread_ts, text, channel=None):
-        return "thr.1"
+    async def post_in_thread(self, thread_root, text, room_id=None):
+        return "$thr.1"
 
-    async def edit_top_level(self, ts, text, channel=None):
+    async def edit_top_level(self, ts, text, room_id=None):
         pass
 
-    async def react(self, ts, emoji, channel=None):
+    async def react(self, ts, emoji, room_id=None):
         pass
 
 
@@ -31,7 +31,7 @@ async def test_get_or_create_spawns_one_worker_per_sid(tmp_db_path: str) -> None
     reg = Registry(tmp_db_path)
     reg.open()
     reg.upsert_session("s1", "/x", "main", "13")
-    sup = Supervisor(reg=reg, slack=_FakeSlack(), actuator=_FakeActuator())
+    sup = Supervisor(reg=reg, matrix=_FakeMatrix(), actuator=_FakeActuator())
     w1 = await sup.get_or_create("s1")
     w2 = await sup.get_or_create("s1")
     assert w1 is w2
@@ -47,7 +47,7 @@ async def test_reap_removes_idle_workers(tmp_db_path: str) -> None:
     clock = {"t": 1000.0}
     sup = Supervisor(
         reg=reg,
-        slack=_FakeSlack(),
+        matrix=_FakeMatrix(),
         actuator=_FakeActuator(),
         idle_seconds=5,
         clock=lambda: clock["t"],
@@ -73,7 +73,7 @@ async def test_attached_reader_keeps_worker_alive_indefinitely(tmp_db_path: str,
     clock = {"t": 1000.0}
     sup = Supervisor(
         reg=reg,
-        slack=_FakeSlack(),
+        matrix=_FakeMatrix(),
         actuator=_FakeActuator(),
         idle_seconds=5,
         clock=lambda: clock["t"],
@@ -107,7 +107,7 @@ async def test_recent_activity_keeps_worker_alive(tmp_db_path: str) -> None:
     clock = {"t": 1000.0}
     sup = Supervisor(
         reg=reg,
-        slack=_FakeSlack(),
+        matrix=_FakeMatrix(),
         actuator=_FakeActuator(),
         idle_seconds=5,
         clock=lambda: clock["t"],
