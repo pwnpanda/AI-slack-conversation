@@ -160,6 +160,12 @@ journalctl --user -u claude-slack-bot -f
 - `/cc-list`, `/cc-mute`, `/cc-status` slash commands
 - Verbose mode posting individual tool calls
 - Truncation-with-link for very long responses
+- **Multi-stage answer support.** CC's `AskUserQuestion` is multi-stage:
+  pick an option, then provide a follow-up answer in a subsequent prompt.
+  The bot currently treats every Slack reply as a single typed string into
+  the pane, so a user replying with the full answer in one go can miss the
+  intermediate "pick an option" step. Tracking the pending question state
+  per session and routing replies through stages is open work.
 
 ## Worker redesign (2026-05-27)
 
