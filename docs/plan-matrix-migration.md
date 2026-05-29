@@ -29,11 +29,22 @@ Current: Slack Bolt + AsyncSocketModeHandler keeps a WebSocket to slack.com; `Sl
 
 After: a `matrix-nio` `AsyncClient` runs `sync_forever` against a local Continuwuity LXC; `MatrixIO` replaces `SlackIO`; `sync_forever`'s built-in retry + observable HTTP errors replace the entire `SlackPoller`. Workers, supervisor, transcript reader, registry, liveness, Zellij actuator, hooks, HTTP event endpoint — all unchanged.
 
+Ingress chain after the proxy swap (see §11):
+
+```
+                                                      ┌─► Continuwuity :6167 (HTTP)
+Element X (cellular) ──HTTPS──► router :443 ──► Caddy LXC ─┤
+                                                      └─► ntfy :2586 (HTTP)
+                                              chat.robinlunde.com / push.robinlunde.com
+```
+
+Daemon flow (unchanged shape, MatrixIO swap):
+
 ```
 Agent hook → POST /event → daemon ─┐
-                                   ├─ MatrixIO ──HTTPS──► Continuwuity LXC ─push─► ntfy LXC ─UP─► Element X
-Zellij pane ◄── ZellijActuator ◄───┘                            ▲                                    │
-                                                                └────────── /sync (long-poll) ────────┘
+                                   ├─ MatrixIO ──HTTPS──► Continuwuity LXC ─push─► ntfy (same LXC) ─UP─► Element X
+Zellij pane ◄── ZellijActuator ◄───┘                            ▲                                       │
+                                                                └────────── /sync (long-poll) ───────────┘
 ```
 
 ## 3. Infrastructure setup (Proxmox)
@@ -41,18 +52,19 @@ Zellij pane ◄── ZellijActuator ◄───┘                            
 One LXC for Continuwuity + ntfy co-located (no inter-LXC network hops; saves one reverse-proxy hop and a TLS cert; both are lightweight). Sibling LXC was considered and rejected — no isolation benefit for single-user.
 
 - **LXC**: Debian 12, unprivileged, 2 vCPU / 2 GB RAM / 8 GB disk. Continuwuity steady-state is well under 200 MB; RocksDB grows slowly for a single-user server.
-- **Hostnames / DNS**: pick a domain (open question §10). Two A records on the LAN: `matrix.<domain>` and `ntfy.<domain>` both pointing at the LXC IP. If the domain is only used internally, run a split-horizon DNS entry on the UDM; otherwise public DNS + Let's Encrypt DNS-01 works.
-- **Reverse proxy**: **Caddy**. One file, automatic ACME, terminates TLS for both vhosts. nginx is fine but needs certbot wiring; not worth the extra moving parts for two vhosts.
-- **TLS**: Let's Encrypt via Caddy's built-in ACME. DNS-01 if the LXC is not internet-reachable on :80.
-- **conduwuit/Continuwuity config** (`/etc/continuwuity/continuwuity.toml`):
-  - `server_name = "matrix.<domain>"`
+- **Hostnames / DNS**: `chat.robinlunde.com` (homeserver) and `push.robinlunde.com` (ntfy). Two A records pointing at the home IP, kept fresh by the existing DDNS automation. Wildcard cert on the existing Caddy LXC already covers `*.robinlunde.com`.
+- **Reverse proxy**: **existing Caddy LXC** (made the sole public hit per §11). The new Matrix LXC has no public-facing process — Caddy reverse-proxies HTTP from the LAN side, terminating TLS at the edge with the existing wildcard.
+- **TLS**: terminated at Caddy. The Matrix LXC stays HTTP-only on the LAN interface — no cert, no ACME, no certbot. Cert renewals continue under Caddy's existing flow.
+- **Continuwuity config** (`/etc/continuwuity/continuwuity.toml`):
+  - `server_name = "chat.robinlunde.com"`
   - `allow_federation = false`
   - `allow_registration = false` (provision the bot + user accounts via admin API)
   - `database_backend = "rocksdb"` (default; verify on release notes for the version you install)
-  - `address = "127.0.0.1"`, `port = 6167` — Caddy reverse-proxies `:443` → `:6167`
+  - `address = "0.0.0.0"`, `port = 6167` — listens on the LAN interface so the Caddy LXC can reach it. (Firewall the LXC at the Proxmox level to only allow the Caddy LXC IP, since there is no TLS protecting LAN-side traffic.)
+- **`.well-known` discovery**: Element X probes `https://chat.robinlunde.com/.well-known/matrix/client`. Either let Continuwuity serve it directly (configurable) or serve a static JSON from Caddy: `{"m.homeserver":{"base_url":"https://chat.robinlunde.com"}}`. Both work; Continuwuity-served is one fewer config file.
 - **Backups**: nightly `systemctl stop continuwuity && tar czf …/rocksdb-$(date).tar.gz /var/lib/continuwuity && systemctl start` to the Proxmox backup volume. RocksDB does not tolerate hot copies. Single-user, so the downtime is irrelevant.
 - **Systemd unit**: install the upstream `.service` from the release tarball; the project ships one. Type=notify, Restart=on-failure.
-- **Health check**: `curl -fsS https://matrix.<domain>/_matrix/client/versions | jq .versions` — returns the supported spec versions list; fail if non-200 or empty.
+- **Health check** (from LAN): `curl -fsS http://<matrix-lxc-ip>:6167/_matrix/client/versions | jq .versions`. From outside: `curl -fsS https://chat.robinlunde.com/_matrix/client/versions | jq .versions`. Both must return a non-empty `versions` list.
 
 Upstream install docs: https://continuwuity.org/ — follow their Debian instructions rather than re-deriving them here.
 
@@ -60,15 +72,22 @@ Upstream install docs: https://continuwuity.org/ — follow their Debian instruc
 
 Element X needs a push gateway because the app cannot maintain a background WebSocket to Matrix on Android. UnifiedPush + ntfy avoid Google FCM entirely; the homeserver POSTs to the ntfy `/_matrix/push/v1/notify` endpoint, ntfy fans out to the Android distributor app, which wakes Element X.
 
-- **Deploy**: same LXC. ntfy is a single Go binary; `apt install ntfy` on Debian 12 or download release.
+- **Deploy**: same LXC as Continuwuity. ntfy is a single Go binary; `apt install ntfy` on Debian 12 or download release.
 - **Config** (`/etc/ntfy/server.yml`):
-  - `base-url: "https://ntfy.<domain>"` (required for the Matrix gateway to function)
-  - `listen-http: "127.0.0.1:2586"`
+  - `base-url: "https://push.robinlunde.com"` (required for the Matrix gateway to function)
+  - `listen-http: "0.0.0.0:2586"` (LAN-side so the Caddy LXC can reach it)
   - `behind-proxy: true`
   - Disable the web app (`web-root: disable`) — single-user, not needed.
-- **Caddy route**: `ntfy.<domain> { reverse_proxy 127.0.0.1:2586 }`.
-- **Verify**: `curl https://ntfy.<domain>/_matrix/push/v1/notify` returns `{"unifiedpush":{"gateway":"matrix"}}`.
-- **Android client**: install ntfy app from F-Droid; settings → server URL = `https://ntfy.<domain>`. Then install Element X; on first login it autodetects ntfy as the UnifiedPush distributor. Disable battery optimisation for both apps (see dontkillmyapp.com guidance referenced in Element's docs).
+- **Caddy site** (on the existing Caddy LXC, added alongside the existing wildcard-cert config):
+  ```caddy
+  push.robinlunde.com {
+      reverse_proxy http://<matrix-lxc-ip>:2586 {
+          flush_interval -1
+      }
+  }
+  ```
+- **Verify**: `curl https://push.robinlunde.com/_matrix/push/v1/notify` returns `{"unifiedpush":{"gateway":"matrix"}}`.
+- **Android client**: install ntfy app from F-Droid; settings → server URL = `https://push.robinlunde.com`. Then install Element X; on first login it autodetects ntfy as the UnifiedPush distributor. Disable battery optimisation for both apps (see dontkillmyapp.com guidance referenced in Element's docs).
 
 Reference: https://docs.element.io/latest/element-support/element-androidios-client-settings/using-unified-push-and-ntfy-for-push-notifications/
 
@@ -211,12 +230,88 @@ Run all of these against the new daemon before declaring the cutover done.
 | README + env example rewrite | 1 |
 | **Total** | **~14.5 h (≈2 working days)** |
 
-## 10. Open questions
+## 10. Decisions & open questions
 
-- **Domain name.** Public domain with DNS-01 ACME, or LAN-only with a split-horizon DNS entry on the UDM? Decision affects Caddy config and how Element X validates the cert.
+**Resolved.**
+- **Ingress.** Port forward `:443` → Caddy LXC. DDNS keeps the home IP fresh. Existing wildcard cert on Caddy covers both subdomains. (No Cloudflare Tunnel, no Tailscale Funnel.)
+- **Hostnames.** `chat.robinlunde.com` for Continuwuity, `push.robinlunde.com` for ntfy. Both proxied by the existing Caddy LXC.
+- **TLS termination.** At the existing Caddy LXC. Matrix LXC stays HTTP-only on the LAN interface; firewalled to only accept connections from the Caddy LXC IP.
+- **Proxy chain.** Caddy becomes the sole public hit; HA NPM retired from the public path (see §11 for the swap procedure and rollback).
+- **Emoji set.** `✅ ⚠️ 🚫` Unicode glyphs (Element X renders cleanly, matches the Slack semantics 1:1).
+- **E2EE for v1.** No. Skip libolm / key management; revisit once everything else is stable.
+- **Room layout.** Per-agent rooms (`#claude`, `#codex`, `#gemini` + fallback), one thread per session. Matches the existing channel split and gives per-agent mobile mute granularity.
+
+**Still open.**
 - **Backup destination.** Proxmox PBS, or a separate target?
-- **Bot username.** `@cc-bot`? `@agent`? Affects readability of the agent label prefix (`[Claude]` etc.) — possibly redundant if each agent has its own room.
-- **E2EE for v1?** Recommendation: no. Confirm.
-- **Keep per-agent rooms, or collapse to one room with threads?** Recommendation: per-agent rooms (matches existing channel split, easier mute granularity on mobile). Confirm.
-- **Emoji set.** Slack uses `:white_check_mark:`-style names; Matrix reactions are arbitrary Unicode keys. Standardise on `✅ ⚠️ 🚫` or pick different glyphs?
-- **Federation later.** Closed for v1; if you ever want it on, `allow_federation` cannot be flipped cleanly per Continuwuity's own warning. Decide now if you want to leave the door open.
+- **Bot username.** `@cc-bot`? `@agent`? Affects readability of the `[Claude]` etc. label — could be dropped if each agent has its own room.
+- **Federation later.** Closed for v1; if you ever want it on, `allow_federation` cannot be flipped cleanly per Continuwuity's warning. Decide now whether to leave the door open.
+
+## 11. Caddy-first ingress: swap procedure, risks, and pre-cutover checks
+
+The Matrix migration assumes the public ingress is **Caddy**, not Home Assistant's Nginx Proxy Manager. This swaps the order of the existing chain (`Internet → HA NPM → Caddy → service` becomes `Internet → Caddy → service`). The rationale is in the migration design notes; this section is the operational checklist.
+
+### Swap procedure
+
+1. **Snapshot the Caddy LXC** in Proxmox first. A broken Caddyfile becomes a global outage now that Caddy is the only ingress.
+2. **Migrate site blocks**: for every HA NPM proxy host currently exposed publicly, add an equivalent Caddy site block:
+   ```caddy
+   <hostname>.robinlunde.com {
+       reverse_proxy <upstream-host>:<port>
+   }
+   ```
+   Keep the wildcard ACME config that's already producing certs; nothing changes on the cert side.
+3. **Add the two new Matrix site blocks** (with the `/sync` long-poll and SSE settings):
+   ```caddy
+   chat.robinlunde.com {
+       reverse_proxy http://<matrix-lxc-ip>:6167 {
+           flush_interval -1
+           transport http {
+               read_timeout 5m
+           }
+       }
+   }
+
+   push.robinlunde.com {
+       reverse_proxy http://<matrix-lxc-ip>:2586 {
+           flush_interval -1
+       }
+   }
+   ```
+4. **Internal-only sites** (anything currently behind Caddy that should never be public): bind to the LAN interface so the listener physically cannot accept WAN traffic, regardless of DNS:
+   ```caddy
+   (internal) {
+       bind <caddy-lan-ip>
+   }
+
+   internal-service.robinlunde.com {
+       import internal
+       reverse_proxy <upstream>:<port>
+   }
+   ```
+   Re-test the leak check below whenever a new internal site is added.
+5. **Validate before reload**: `caddy validate --config /etc/caddy/Caddyfile`. Reload only on a green validate.
+6. **Reload Caddy**, confirm the existing public hostnames still serve, then **flip the router port-forward** `:443` from the HA NPM LXC IP to the Caddy LXC IP. (And `:80` if you keep an HTTP→HTTPS redirect.)
+7. **Stop HA NPM from accepting public traffic.** Either stop the add-on or remove the proxy hosts from its config. Keep the add-on installed for one week as a rollback path — flipping the router back is a 1-minute operation if something breaks.
+8. **After one week of stable Matrix operation**: remove the HA NPM add-on if nothing else in HA references it.
+
+### Risks to verify after the swap
+
+Each risk has a one-line check you can run to confirm the safe state. Re-run before and after the cutover, and whenever Caddyfile changes touch ingress.
+
+- **ACME DNS-01 token scope.** The wildcard cert renewal token can rewrite DNS for the whole zone if not scoped. **Check**: `grep acme_dns /etc/caddy/Caddyfile` returns the expected provider + token env var; if your DNS provider supports it, scope the API token to `_acme-challenge` records only.
+- **`/sync` long-poll timeouts.** Element X opens a `/sync` request with a ~60s timeout. If Caddy closes the connection earlier, clients reconnect in a loop and push notifications fall behind. **Check**: `journalctl -u caddy | rg 'context deadline'` returns nothing in steady-state idle. The `flush_interval -1` + `read_timeout 5m` lines above prevent this; deleting either reintroduces the bug.
+- **Federation reachability.** Federation is off for v1, but if you ever turn it on, the `.well-known` and SRV records need to point clients at port 443 over the public hostname. **Check**: `curl -fsS https://chat.robinlunde.com/.well-known/matrix/server | jq` returns `{"m.server":"chat.robinlunde.com:443"}` (or whatever you configured). The [federation tester](https://federationtester.matrix.org/) confirms end-to-end.
+- **Internal-site leak.** A misconfigured site block could expose an internal service publicly. **Check** (run from off-LAN — phone on cellular works):
+  ```bash
+  curl -v -H "Host: internal-service.robinlunde.com" https://<public-IP>/
+  ```
+  Should return a TLS error or 404 — never the service body. The `bind <lan-ip>` directive is what guarantees this; re-test whenever a new internal site is added.
+- **Single point of failure.** Caddy is now the only ingress; a bad Caddyfile takes everything down. **Check**: `caddy validate --config /etc/caddy/Caddyfile && echo OK` returns OK before every reload. Wire this into your edit workflow (pre-commit hook, alias, whatever). Snapshot the Caddy LXC before non-trivial changes.
+- **HA add-on removal.** Before deleting the HA NPM add-on, confirm nothing in HA's automations or scripts calls its API. **Check**: `grep -r "nginx-proxy-manager\|<npm-internal-host>" /config/` in the HA config volume returns no matches.
+- **Matrix LXC firewall.** Matrix LXC is HTTP-only on the LAN; if any other host can reach `:6167`/`:2586` they get unencrypted access to your homeserver. **Check** (from a non-Caddy LXC):
+  ```bash
+  curl --max-time 3 http://<matrix-lxc-ip>:6167/_matrix/client/versions
+  ```
+  Should time out or refuse. Allow only the Caddy LXC IP via Proxmox firewall.
+- **Sync watchdog still wired.** With `SlackPoller` deleted, the only liveness signal is `sync_forever` raising. Make sure `sd_notify.watchdog()` is called from the sync-response callback (see §6 `__main__.py` notes); otherwise `WatchdogSec=600` will restart the daemon every 10 minutes during legitimate quiet periods.
+- **Push delivery latency.** If push falls behind, the cause is usually ntfy or UnifiedPush, not Caddy. **Check**: post a test event via the bot, watch `journalctl -u ntfy -f` for the inbound POST and the outbound UP delivery within a second of the event. Element X should fire within 5s on the phone.
