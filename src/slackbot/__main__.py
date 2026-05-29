@@ -102,7 +102,14 @@ async def amain() -> None:
     liveness = LivenessCache(session_is_alive)
     handlers = EventHandlers(reg, supervisor, slack_io)
     router = ReplyRouter(reg=reg, supervisor=supervisor, liveness=liveness, slack=slack_io)
-    commands = SlackCommandHandler(reg=reg, slack=slack_io)
+    commands = SlackCommandHandler(
+        reg=reg,
+        slack=slack_io,
+        actuator=actuator,
+        zellij_session=cfg.new_pane_zellij_session,
+        new_pane_command=cfg.new_pane_command,
+        new_pane_delay_seconds=cfg.new_pane_delay_seconds,
+    )
 
     bolt = AsyncApp(token=cfg.slack_bot_token, client=web_client)
     loop = asyncio.get_running_loop()

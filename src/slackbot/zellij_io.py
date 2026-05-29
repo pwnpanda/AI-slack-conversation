@@ -28,6 +28,28 @@ class ZellijActuator:
             await self._zellij(session, "action", "write-chars", text)
             await self._zellij(session, "action", "write", "13")
 
+    async def spawn_pane_with_command(
+        self,
+        session: str,
+        command_argv: tuple[str, ...] | list[str],
+        initial_text: str,
+        delay_seconds: float,
+    ) -> None:
+        """Open a new pane running *command_argv*, then type *initial_text* + Enter.
+
+        Holds the lock through the whole sequence so other deliveries can't
+        steal focus between the new-pane and the write-chars. The sleep
+        blocks other zellij actuations for delay_seconds — acceptable at
+        single-user scale; tune via SLACKBOT_NEW_PANE_DELAY_SECONDS.
+        """
+        if not command_argv:
+            raise ZellijError("spawn_pane_with_command requires a non-empty command")
+        async with self._lock:
+            await self._zellij(session, "action", "new-pane", "--", *command_argv)
+            await asyncio.sleep(delay_seconds)
+            await self._zellij(session, "action", "write-chars", initial_text)
+            await self._zellij(session, "action", "write", "13")
+
     async def _zellij(self, session: str, *args: str, allow_already: bool = False) -> None:
         cmd = ["zellij", "--session", session, *args]
         result = await asyncio.to_thread(

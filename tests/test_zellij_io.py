@@ -124,3 +124,35 @@ exit 0
     assert f"focus-pane-id {other_pane}" in lines[3]
     assert f"write-chars {other_text}" in lines[4]
     assert "write 13" in lines[5]
+
+
+@pytest.mark.asyncio
+async def test_spawn_pane_with_command_runs_new_pane_then_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_file = tmp_path / "calls.log"
+    _make_fake_zellij(bin_dir, log_file=log_file)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    act = ZellijActuator()
+    await act.spawn_pane_with_command(
+        session="main",
+        command_argv=("claude", "--dangerously-skip-permissions"),
+        initial_text="/rn kbd",
+        delay_seconds=0.01,
+    )
+    calls = log_file.read_text().splitlines()
+    assert len(calls) == 3
+    assert "action new-pane -- claude --dangerously-skip-permissions" in calls[0]
+    assert "action write-chars /rn kbd" in calls[1]
+    assert "action write 13" in calls[2]
+
+
+@pytest.mark.asyncio
+async def test_spawn_pane_rejects_empty_argv() -> None:
+    act = ZellijActuator()
+    with pytest.raises(ZellijError):
+        await act.spawn_pane_with_command(
+            session="main", command_argv=(), initial_text="/rn x", delay_seconds=0.0
+        )

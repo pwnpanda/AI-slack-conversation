@@ -8,15 +8,9 @@ from slackbot.slack_commands import SlackCommandHandler
 
 @dataclass
 class _FakeSlack:
-    top_level: list[tuple[str, str]] = field(default_factory=list)  # (channel, text)
     in_thread: list[tuple[str, str, str]] = field(default_factory=list)  # (thread, text, ch)
     reactions: list[tuple[str, str, str]] = field(default_factory=list)  # (ts, emoji, ch)
     _ts: int = 100
-
-    async def post_top_level(self, text: str, channel: str | None = None) -> str:
-        self._ts += 1
-        self.top_level.append((channel or "", text))
-        return f"top.{self._ts}"
 
     async def post_in_thread(self, thread_ts: str, text: str, channel: str | None = None) -> str:
         self._ts += 1
@@ -27,21 +21,55 @@ class _FakeSlack:
         self.reactions.append((ts, emoji, channel or ""))
 
 
+@dataclass
+class _FakeActuator:
+    spawns: list[dict] = field(default_factory=list)
+    raise_on_spawn: Exception | None = None
+
+    async def spawn_pane_with_command(
+        self, session, command_argv, initial_text, delay_seconds
+    ) -> None:
+        self.spawns.append(
+            {
+                "session": session,
+                "command_argv": tuple(command_argv),
+                "initial_text": initial_text,
+                "delay_seconds": delay_seconds,
+            }
+        )
+        if self.raise_on_spawn is not None:
+            raise self.raise_on_spawn
+
+
+def _handler(reg, slack, actuator=None):
+    return SlackCommandHandler(
+        reg=reg,
+        slack=slack,
+        actuator=actuator or _FakeActuator(),
+        zellij_session="main",
+        new_pane_command=("claude", "--dangerously-skip-permissions"),
+        new_pane_delay_seconds=0.01,
+    )
+
+
 @pytest.mark.asyncio
-async def test_new_reserves_thread_when_name_is_free(tmp_db_path: str) -> None:
+async def test_new_spawns_pane_and_types_rn_when_name_free(tmp_db_path: str) -> None:
     reg = Registry(tmp_db_path)
     reg.open()
     slack = _FakeSlack()
-    cmd = SlackCommandHandler(reg=reg, slack=slack)
+    actuator = _FakeActuator()
+    cmd = _handler(reg, slack, actuator)
     handled = await cmd.maybe_handle(channel="C-X", text="/new kbd", msg_ts="MSG.1")
     assert handled is True
-    assert len(slack.top_level) == 1
-    assert "kbd" in slack.top_level[0][1]
-    sess = reg.get_session_by_name("kbd", channel="C-X")
-    assert sess is not None
-    assert sess.slack_thread_ts == slack.top_level[0][1] or sess.slack_thread_ts.startswith("top.")
-    # Confirmation reaction on the user's command message.
-    assert ("MSG.1", "white_check_mark", "C-X") in slack.reactions
+    assert len(actuator.spawns) == 1
+    spawn = actuator.spawns[0]
+    assert spawn["session"] == "main"
+    assert spawn["command_argv"] == ("claude", "--dangerously-skip-permissions")
+    assert spawn["initial_text"] == "/rn kbd"
+    # Hourglass before, checkmark after.
+    emojis = [r[1] for r in slack.reactions if r[0] == "MSG.1"]
+    assert "hourglass_flowing_sand" in emojis
+    assert "white_check_mark" in emojis
     reg.close()
 
 
@@ -53,10 +81,11 @@ async def test_new_refuses_when_name_already_in_use(tmp_db_path: str) -> None:
     reg.claim_name("existing", "kbd")
     reg.set_thread_ts("existing", "T.OLD")
     slack = _FakeSlack()
-    cmd = SlackCommandHandler(reg=reg, slack=slack)
+    actuator = _FakeActuator()
+    cmd = _handler(reg, slack, actuator)
     handled = await cmd.maybe_handle(channel="C-X", text="/new kbd", msg_ts="MSG.2")
     assert handled is True
-    assert slack.top_level == []  # no new thread created
+    assert actuator.spawns == []  # no pane spawned on collision
     assert any("already in use" in t[1] for t in slack.in_thread)
     assert ("MSG.2", "x", "C-X") in slack.reactions
     reg.close()
@@ -66,7 +95,7 @@ async def test_new_refuses_when_name_already_in_use(tmp_db_path: str) -> None:
 async def test_handler_ignores_non_command_text(tmp_db_path: str) -> None:
     reg = Registry(tmp_db_path)
     reg.open()
-    cmd = SlackCommandHandler(reg=reg, slack=_FakeSlack())
+    cmd = _handler(reg, _FakeSlack())
     assert await cmd.maybe_handle(channel="C-X", text="hello there", msg_ts="m") is False
     assert await cmd.maybe_handle(channel="C-X", text="/new", msg_ts="m") is False
     assert await cmd.maybe_handle(channel="C-X", text="/newx foo", msg_ts="m") is False
@@ -74,13 +103,28 @@ async def test_handler_ignores_non_command_text(tmp_db_path: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reserved_name_scoped_per_channel(tmp_db_path: str) -> None:
-    """Same name in a different channel is allowed (per-agent rooms)."""
+async def test_spawn_failure_is_reported(tmp_db_path: str) -> None:
     reg = Registry(tmp_db_path)
     reg.open()
     slack = _FakeSlack()
-    cmd = SlackCommandHandler(reg=reg, slack=slack)
-    assert await cmd.maybe_handle(channel="C-A", text="/new kbd", msg_ts="m1") is True
-    assert await cmd.maybe_handle(channel="C-B", text="/new kbd", msg_ts="m2") is True
-    assert len(slack.top_level) == 2
+    actuator = _FakeActuator(raise_on_spawn=RuntimeError("zellij not running"))
+    cmd = _handler(reg, slack, actuator)
+    await cmd.maybe_handle(channel="C-X", text="/new kbd", msg_ts="MSG.3")
+    assert any("Failed to spawn new pane" in t[1] for t in slack.in_thread)
+    # Hourglass reaction set, but no success checkmark.
+    emojis = [r[1] for r in slack.reactions if r[0] == "MSG.3"]
+    assert "hourglass_flowing_sand" in emojis
+    assert "white_check_mark" not in emojis
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_name_uniqueness_is_per_channel(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("existing", "/x", "main", "1", slack_channel="C-A")
+    reg.claim_name("existing", "kbd")
+    cmd = _handler(reg, _FakeSlack(), _FakeActuator())
+    # Same name in a different channel should be allowed.
+    assert await cmd.maybe_handle(channel="C-B", text="/new kbd", msg_ts="m") is True
     reg.close()
