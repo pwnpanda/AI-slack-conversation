@@ -62,7 +62,9 @@ One LXC for Continuwuity + ntfy co-located (no inter-LXC network hops; saves one
   - `database_backend = "rocksdb"` (default; verify on release notes for the version you install)
   - `address = "0.0.0.0"`, `port = 6167` — listens on the LAN interface so the Caddy LXC can reach it. (Firewall the LXC at the Proxmox level to only allow the Caddy LXC IP, since there is no TLS protecting LAN-side traffic.)
 - **`.well-known` discovery**: Element X probes `https://chat.robinlunde.com/.well-known/matrix/client`. Either let Continuwuity serve it directly (configurable) or serve a static JSON from Caddy: `{"m.homeserver":{"base_url":"https://chat.robinlunde.com"}}`. Both work; Continuwuity-served is one fewer config file.
-- **Backups**: nightly `systemctl stop continuwuity && tar czf …/rocksdb-$(date).tar.gz /var/lib/continuwuity && systemctl start` to the Proxmox backup volume. RocksDB does not tolerate hot copies. Single-user, so the downtime is irrelevant.
+- **Backups**: two paths, both stop-the-world (RocksDB does not tolerate hot copies; single-user, so a 30-second downtime is invisible).
+  - **Local nightly**: `systemctl stop continuwuity ntfy && tar czf /var/backups/matrix/$(date +%F).tar.gz /var/lib/continuwuity /etc/continuwuity /etc/ntfy /var/lib/ntfy && systemctl start continuwuity ntfy`. Rotate with `find /var/backups/matrix -mtime +14 -delete`.
+  - **PBS**: the LXC itself is included in the regular Proxmox PBS job; with `stop` mode on the schedule (not `snapshot`), PBS gets a consistent RocksDB image. Confirm the LXC is in the right backup group in the PBS UI.
 - **Systemd unit**: install the upstream `.service` from the release tarball; the project ships one. Type=notify, Restart=on-failure.
 - **Health check** (from LAN): `curl -fsS http://<matrix-lxc-ip>:6167/_matrix/client/versions | jq .versions`. From outside: `curl -fsS https://chat.robinlunde.com/_matrix/client/versions | jq .versions`. Both must return a non-empty `versions` list.
 
@@ -101,7 +103,7 @@ Reference: https://docs.element.io/latest/element-support/element-androidios-cli
   {"msgtype":"m.text","body":"...","m.relates_to":{"rel_type":"m.thread","event_id":"<root_event_id>"}}
   ```
   Element X renders these as threads. Spec stable since v1.4 / MSC3440.
-- **Accounts**: one bot account (e.g. `@cc-bot:matrix.<domain>`) and one user account (`@robin:matrix.<domain>`). Provision both via Continuwuity's admin command room (the server creates a `#admins` room on first start; commands like `!admin create-user` are documented in the Continuwuity admin docs). Issue an access token for the bot via `POST /_matrix/client/v3/login` with `type=m.login.password` and store it in the env file.
+- **Accounts**: one bot account (e.g. `@ai-bot:matrix.<domain>`) and one user account (`@robin:matrix.<domain>`). Provision both via Continuwuity's admin command room (the server creates a `#admins` room on first start; commands like `!admin create-user` are documented in the Continuwuity admin docs). Issue an access token for the bot via `POST /_matrix/client/v3/login` with `type=m.login.password` and store it in the env file.
 
 ## 6. Code port plan
 
@@ -143,7 +145,7 @@ Replace lines 12-25, 48-62. New fields:
 
 ```python
 matrix_homeserver: str   # MATRIX_HOMESERVER, e.g. https://matrix.<domain>
-matrix_user_id: str      # MATRIX_USER_ID, e.g. @cc-bot:matrix.<domain>
+matrix_user_id: str      # MATRIX_USER_ID, e.g. @ai-bot:matrix.<domain>
 matrix_access_token: str # MATRIX_ACCESS_TOKEN
 matrix_device_id: str    # MATRIX_DEVICE_ID — persisted for /sync continuity
 matrix_store_dir: str    # default: $XDG_STATE_HOME/claude-slack-bot/nio-store
@@ -241,9 +243,12 @@ Run all of these against the new daemon before declaring the cutover done.
 - **E2EE for v1.** No. Skip libolm / key management; revisit once everything else is stable.
 - **Room layout.** Per-agent rooms (`#claude`, `#codex`, `#gemini` + fallback), one thread per session. Matches the existing channel split and gives per-agent mobile mute granularity.
 
+**Also resolved.**
+- **Backups.** Local nightly tarball to `/var/backups/matrix/`, plus the LXC in the existing PBS job (`stop` mode for RocksDB consistency).
+- **Bot username.** `@ai-bot:chat.robinlunde.com` (Matrix convention lowercases user IDs). Human user `@robin:chat.robinlunde.com`.
+- **LXC layout.** One LXC for both Continuwuity and ntfy. Co-located; ntfy reachable at `127.0.0.1:2586` from Continuwuity's push gateway config.
+
 **Still open.**
-- **Backup destination.** Proxmox PBS, or a separate target?
-- **Bot username.** `@cc-bot`? `@agent`? Affects readability of the `[Claude]` etc. label — could be dropped if each agent has its own room.
 - **Federation later.** Closed for v1; if you ever want it on, `allow_federation` cannot be flipped cleanly per Continuwuity's warning. Decide now whether to leave the door open.
 
 ## 11. Caddy-first ingress: swap procedure, risks, and pre-cutover checks
