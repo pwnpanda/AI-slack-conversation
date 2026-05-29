@@ -2,42 +2,46 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+log = logging.getLogger(__name__)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
-  cc_session_id   TEXT PRIMARY KEY,
-  agent           TEXT NOT NULL DEFAULT 'claude',
-  name            TEXT,
-  cwd             TEXT NOT NULL,
-  zellij_session  TEXT,
-  zellij_pane_id  TEXT,
-  slack_channel   TEXT,
-  slack_thread_ts TEXT,
-  cc_pid          INTEGER,
-  transcript_path TEXT,
+  cc_session_id      TEXT PRIMARY KEY,
+  agent              TEXT NOT NULL DEFAULT 'claude',
+  name               TEXT,
+  cwd                TEXT NOT NULL,
+  zellij_session     TEXT,
+  zellij_pane_id     TEXT,
+  matrix_room_id     TEXT,
+  matrix_thread_root TEXT,
+  cc_pid             INTEGER,
+  transcript_path    TEXT,
   pending_notification TEXT,
-  created_at      INTEGER NOT NULL,
-  last_event_at   INTEGER NOT NULL,
-  status          TEXT NOT NULL
+  transcript_offset  INTEGER,
+  created_at         INTEGER NOT NULL,
+  last_event_at      INTEGER NOT NULL,
+  status             TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS event_log (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  cc_session_id   TEXT NOT NULL,
-  ts              INTEGER NOT NULL,
-  kind            TEXT NOT NULL,
-  payload         TEXT NOT NULL,
-  slack_msg_ts    TEXT,
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  cc_session_id     TEXT NOT NULL,
+  ts                INTEGER NOT NULL,
+  kind              TEXT NOT NULL,
+  payload           TEXT NOT NULL,
+  matrix_event_id   TEXT,
   FOREIGN KEY (cc_session_id) REFERENCES sessions(cc_session_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_log_unposted
-  ON event_log(cc_session_id) WHERE slack_msg_ts IS NULL;
+  ON event_log(cc_session_id) WHERE matrix_event_id IS NULL;
 """
 
 
@@ -49,8 +53,8 @@ class Session:
     cwd: str
     zellij_session: str | None
     zellij_pane_id: str | None
-    slack_channel: str | None
-    slack_thread_ts: str | None
+    matrix_room_id: str | None
+    matrix_thread_root: str | None
     cc_pid: int | None
     transcript_path: str | None
     created_at: int
@@ -65,7 +69,7 @@ class Event:
     ts: int
     kind: str
     payload: str
-    slack_msg_ts: str | None
+    matrix_event_id: str | None
 
 
 class Registry:
@@ -81,25 +85,28 @@ class Registry:
         # busy_timeout makes transient locks retry instead of failing fast.
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        self._drop_pre_matrix_schema_if_present()
         self._conn.executescript(_SCHEMA)
-        self._migrate()
 
-    def _migrate(self) -> None:
-        columns = {
-            row["name"] for row in self._c().execute("PRAGMA table_info(sessions)").fetchall()
-        }
-        if "agent" not in columns:
-            self._c().execute(
-                "ALTER TABLE sessions ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude'"
-            )
-        if "cc_pid" not in columns:
-            self._c().execute("ALTER TABLE sessions ADD COLUMN cc_pid INTEGER")
-        if "transcript_path" not in columns:
-            self._c().execute("ALTER TABLE sessions ADD COLUMN transcript_path TEXT")
-        if "pending_notification" not in columns:
-            self._c().execute("ALTER TABLE sessions ADD COLUMN pending_notification TEXT")
-        if "transcript_offset" not in columns:
-            self._c().execute("ALTER TABLE sessions ADD COLUMN transcript_offset INTEGER")
+    def _drop_pre_matrix_schema_if_present(self) -> None:
+        """Detect a pre-Matrix schema (Slack columns) and discard the DB.
+
+        Per the migration plan: this is a single-user deploy, the old DB has
+        no value after the cutover because Slack thread IDs are meaningless
+        under Matrix. Drop the legacy tables and let the new schema recreate
+        from scratch. Idempotent: a fresh DB already has the new schema,
+        so the detection short-circuits.
+        """
+        conn = self._c()
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+        ).fetchone()
+        if row is None:
+            return
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "slack_channel" in columns or "slack_thread_ts" in columns:
+            log.warning("dropping pre-Matrix registry at %s", self._db_path)
+            conn.executescript("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS event_log;")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -118,7 +125,7 @@ class Registry:
         zellij_session: str | None,
         zellij_pane_id: str | None,
         agent: str = "claude",
-        slack_channel: str | None = None,
+        matrix_room_id: str | None = None,
         cc_pid: int | None = None,
         transcript_path: str | None = None,
     ) -> None:
@@ -126,7 +133,7 @@ class Registry:
         self._c().execute(
             """
             INSERT INTO sessions (cc_session_id, agent, cwd, zellij_session, zellij_pane_id,
-                                  slack_channel, cc_pid, transcript_path,
+                                  matrix_room_id, cc_pid, transcript_path,
                                   created_at, last_event_at, status)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
             ON CONFLICT(cc_session_id) DO UPDATE SET
@@ -134,7 +141,7 @@ class Registry:
               cwd = excluded.cwd,
               zellij_session = excluded.zellij_session,
               zellij_pane_id = excluded.zellij_pane_id,
-              slack_channel = excluded.slack_channel,
+              matrix_room_id = excluded.matrix_room_id,
               cc_pid = COALESCE(excluded.cc_pid, sessions.cc_pid),
               transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path),
               last_event_at = excluded.last_event_at,
@@ -146,7 +153,7 @@ class Registry:
                 cwd,
                 zellij_session,
                 zellij_pane_id,
-                slack_channel,
+                matrix_room_id,
                 cc_pid,
                 transcript_path,
                 now,
@@ -163,10 +170,11 @@ class Registry:
         return _row_to_session(row) if row else None
 
     def list_threads(self) -> list[Session]:
-        """Return all sessions that have a Slack thread bound — used by the
-        web-API fallback poller to know which threads to poll."""
+        """Return all sessions that have a Matrix thread bound."""
         rows = (
-            self._c().execute("SELECT * FROM sessions WHERE slack_thread_ts IS NOT NULL").fetchall()
+            self._c()
+            .execute("SELECT * FROM sessions WHERE matrix_thread_root IS NOT NULL")
+            .fetchall()
         )
         return [_row_to_session(r) for r in rows]
 
@@ -187,21 +195,26 @@ class Registry:
         )
         return [_row_to_session(r) for r in rows]
 
-    def get_session_by_thread(self, thread_ts: str, channel: str | None = None) -> Session | None:
-        if channel:
+    def get_session_by_matrix_thread(
+        self, thread_root: str, room_id: str | None = None
+    ) -> Session | None:
+        if room_id:
             row = (
                 self._c()
                 .execute(
-                    "SELECT * FROM sessions "
-                    "WHERE slack_thread_ts = ? AND (slack_channel = ? OR slack_channel IS NULL)",
-                    (thread_ts, channel),
+                    "SELECT * FROM sessions WHERE matrix_thread_root = ? "
+                    "AND (matrix_room_id = ? OR matrix_room_id IS NULL)",
+                    (thread_root, room_id),
                 )
                 .fetchone()
             )
         else:
             row = (
                 self._c()
-                .execute("SELECT * FROM sessions WHERE slack_thread_ts = ?", (thread_ts,))
+                .execute(
+                    "SELECT * FROM sessions WHERE matrix_thread_root = ?",
+                    (thread_root,),
+                )
                 .fetchone()
             )
         return _row_to_session(row) if row else None
@@ -217,10 +230,10 @@ class Registry:
             "UPDATE sessions SET name = NULL WHERE cc_session_id = ?", (cc_session_id,)
         )
 
-    def set_thread_ts(self, cc_session_id: str, thread_ts: str) -> None:
+    def set_matrix_thread_root(self, cc_session_id: str, thread_root: str) -> None:
         self._c().execute(
-            "UPDATE sessions SET slack_thread_ts = ? WHERE cc_session_id = ?",
-            (thread_ts, cc_session_id),
+            "UPDATE sessions SET matrix_thread_root = ? WHERE cc_session_id = ?",
+            (thread_root, cc_session_id),
         )
 
     def set_pending_notification(
@@ -228,13 +241,13 @@ class Registry:
         cc_session_id: str,
         ts: str,
         text: str,
-        channel: str | None,
+        room_id: str | None,
     ) -> None:
         """Persist the most recently posted notification so the resolved-marker
         edit survives worker reap and daemon restart."""
         import json as _json
 
-        payload = _json.dumps({"ts": ts, "text": text, "channel": channel or ""})
+        payload = _json.dumps({"ts": ts, "text": text, "room_id": room_id or ""})
         self._c().execute(
             "UPDATE sessions SET pending_notification = ? WHERE cc_session_id = ?",
             (payload, cc_session_id),
@@ -242,7 +255,7 @@ class Registry:
 
     def consume_pending_notification(self, cc_session_id: str) -> dict[str, str] | None:
         """Atomically read + clear the pending notification. Returns
-        {ts, text, channel} or None."""
+        {ts, text, room_id} or None."""
         import json as _json
 
         conn = self._c()
@@ -303,17 +316,17 @@ class Registry:
         )
         return _row_to_session(row) if row else None
 
-    def get_session_by_name(self, name: str, channel: str | None = None) -> Session | None:
+    def get_session_by_name(self, name: str, room_id: str | None = None) -> Session | None:
         """Return the most recently active session bound to *name*, or None.
 
-        Used to enforce uniqueness for the Slack-side `/new <name>` command.
-        Restricting to a channel prevents collisions across per-agent rooms.
+        Used to enforce uniqueness for the Matrix-side `/new <name>` command.
+        Restricting to a room prevents collisions across per-agent rooms.
         """
-        if channel is None:
+        if room_id is None:
             row = (
                 self._c()
                 .execute(
-                    "SELECT * FROM sessions WHERE name = ? " "ORDER BY last_event_at DESC LIMIT 1",
+                    "SELECT * FROM sessions WHERE name = ? ORDER BY last_event_at DESC LIMIT 1",
                     (name,),
                 )
                 .fetchone()
@@ -322,15 +335,15 @@ class Registry:
             row = (
                 self._c()
                 .execute(
-                    "SELECT * FROM sessions WHERE name = ? AND slack_channel = ? "
+                    "SELECT * FROM sessions WHERE name = ? AND matrix_room_id = ? "
                     "ORDER BY last_event_at DESC LIMIT 1",
-                    (name, channel),
+                    (name, room_id),
                 )
                 .fetchone()
             )
         return _row_to_session(row) if row else None
 
-    def reserve_name(self, name: str, channel: str, thread_ts: str) -> str:
+    def reserve_name(self, name: str, room_id: str, thread_root: str) -> str:
         """Insert a placeholder session row that owns *name* until a real CC binds.
 
         Returns the synthetic cc_session_id of the placeholder. When a real
@@ -341,14 +354,15 @@ class Registry:
         now = int(time.time())
         self._c().execute(
             "INSERT INTO sessions(cc_session_id, agent, name, cwd, "
-            "slack_channel, slack_thread_ts, created_at, last_event_at, status) "
+            "matrix_room_id, matrix_thread_root, created_at, last_event_at, status) "
             "VALUES (?, 'claude', ?, '(reserved)', ?, ?, ?, ?, 'reserved')",
-            (synthetic_sid, name, channel, thread_ts, now, now),
+            (synthetic_sid, name, room_id, thread_root, now, now),
         )
         return synthetic_sid
 
     def claim_name(self, cc_session_id: str, name: str) -> str | None:
-        """Claim `name` for `cc_session_id`. Returns prior holder's thread_ts (or None).
+        """Claim `name` for `cc_session_id`. Returns prior holder's thread_root
+        (or None).
 
         Wrapped in BEGIN IMMEDIATE/COMMIT so a concurrent claim cannot leave
         two rows owning the same name.
@@ -357,21 +371,21 @@ class Registry:
         conn.execute("BEGIN IMMEDIATE")
         try:
             current = conn.execute(
-                "SELECT slack_channel FROM sessions WHERE cc_session_id = ?",
+                "SELECT matrix_room_id FROM sessions WHERE cc_session_id = ?",
                 (cc_session_id,),
             ).fetchone()
-            current_channel = current["slack_channel"] if current else None
+            current_room = current["matrix_room_id"] if current else None
             prior = conn.execute(
-                "SELECT cc_session_id, slack_channel, slack_thread_ts FROM sessions "
+                "SELECT cc_session_id, matrix_room_id, matrix_thread_root FROM sessions "
                 "WHERE name = ? AND cc_session_id != ?",
                 (name, cc_session_id),
             ).fetchone()
             prior_thread: str | None = None
-            if prior and prior["slack_channel"] == current_channel:
-                prior_thread = prior["slack_thread_ts"]
+            if prior and prior["matrix_room_id"] == current_room:
+                prior_thread = prior["matrix_thread_root"]
             if prior:
                 conn.execute(
-                    "UPDATE sessions SET name = NULL, slack_thread_ts = NULL "
+                    "UPDATE sessions SET name = NULL, matrix_thread_root = NULL "
                     "WHERE cc_session_id = ?",
                     (prior["cc_session_id"],),
                 )
@@ -381,7 +395,7 @@ class Registry:
             )
             if prior_thread:
                 conn.execute(
-                    "UPDATE sessions SET slack_thread_ts = ? WHERE cc_session_id = ?",
+                    "UPDATE sessions SET matrix_thread_root = ? WHERE cc_session_id = ?",
                     (prior_thread, cc_session_id),
                 )
             conn.execute("COMMIT")
@@ -401,8 +415,8 @@ class Registry:
         rows = (
             self._c()
             .execute(
-                "SELECT id, cc_session_id, ts, kind, payload, slack_msg_ts FROM event_log "
-                "WHERE cc_session_id = ? AND slack_msg_ts IS NULL ORDER BY id ASC",
+                "SELECT id, cc_session_id, ts, kind, payload, matrix_event_id FROM event_log "
+                "WHERE cc_session_id = ? AND matrix_event_id IS NULL ORDER BY id ASC",
                 (cc_session_id,),
             )
             .fetchall()
@@ -414,15 +428,15 @@ class Registry:
                 ts=r["ts"],
                 kind=r["kind"],
                 payload=r["payload"],
-                slack_msg_ts=r["slack_msg_ts"],
+                matrix_event_id=r["matrix_event_id"],
             )
             for r in rows
         ]
 
-    def mark_event_posted(self, event_id: int, slack_msg_ts: str) -> None:
+    def mark_event_posted(self, event_id: int, matrix_event_id: str) -> None:
         self._c().execute(
-            "UPDATE event_log SET slack_msg_ts = ? WHERE id = ?",
-            (slack_msg_ts, event_id),
+            "UPDATE event_log SET matrix_event_id = ? WHERE id = ?",
+            (matrix_event_id, event_id),
         )
 
     def set_transcript_offset(self, cc_session_id: str, offset: int) -> None:
@@ -482,8 +496,8 @@ def _row_to_session(row: sqlite3.Row) -> Session:
         cwd=row["cwd"],
         zellij_session=row["zellij_session"],
         zellij_pane_id=row["zellij_pane_id"],
-        slack_channel=row["slack_channel"],
-        slack_thread_ts=row["slack_thread_ts"],
+        matrix_room_id=row["matrix_room_id"],
+        matrix_thread_root=row["matrix_thread_root"],
         cc_pid=row["cc_pid"],
         transcript_path=row["transcript_path"],
         created_at=row["created_at"],

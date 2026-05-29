@@ -12,9 +12,11 @@ def tmp_db_path(tmp_path: Path) -> str:
 
 @pytest.fixture
 def env_full(monkeypatch: pytest.MonkeyPatch, tmp_db_path: str) -> None:
-    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
-    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
-    monkeypatch.setenv("SLACK_CHANNEL_ID", "C12345")
+    monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.com")
+    monkeypatch.setenv("MATRIX_USER_ID", "@ai-bot:matrix.example.com")
+    monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_test_token")
+    monkeypatch.setenv("MATRIX_DEVICE_ID", "slackbot-test")
+    monkeypatch.setenv("MATRIX_ROOM_ID", "!default:matrix.example.com")
     monkeypatch.setenv("SLACKBOT_PORT", "0")
     monkeypatch.setenv("SLACKBOT_DB_PATH", tmp_db_path)
     monkeypatch.setenv("LOG_LEVEL", "WARNING")
