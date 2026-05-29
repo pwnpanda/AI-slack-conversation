@@ -193,3 +193,30 @@ async def test_auto_recover_only_when_predecessor_dead(reg: Registry, sup: Super
     assert new_sess is not None
     assert new_sess.name is None  # not hijacked (predecessor still 'alive')
     await sup.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_event_after_ended_self_heals_status_and_reattaches_reader(
+    reg: Registry, sup: Supervisor, tmp_path
+) -> None:
+    """A prompt/notification arriving for a session previously marked ended
+    must flip status back to active and re-attach the transcript reader,
+    so a stale session_end can't permanently mute the conversation."""
+    slack = FakeSlackIO()
+    h = EventHandlers(reg, sup, slack)
+    transcript = tmp_path / "tx.jsonl"
+    transcript.write_text("")
+    await h.handle(_start(sid="s1") | {"transcript_path": str(transcript)})
+    await h.handle({"kind": "end", "session_id": "s1", "reason": "exit"})
+    assert reg.get_session("s1").status == "ended"
+    assert "s1" not in sup._readers
+    # A fresh hook event arrives — CC must be back.
+    await h.handle(
+        {
+            "kind": "notification",
+            "session_id": "s1",
+            "message": "Claude needs your permission to use Bash",
+        }
+    )
+    assert reg.get_session("s1").status == "active"
+    assert "s1" in sup._readers

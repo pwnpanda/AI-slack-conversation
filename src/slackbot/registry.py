@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -301,6 +302,50 @@ class Registry:
             .fetchone()
         )
         return _row_to_session(row) if row else None
+
+    def get_session_by_name(self, name: str, channel: str | None = None) -> Session | None:
+        """Return the most recently active session bound to *name*, or None.
+
+        Used to enforce uniqueness for the Slack-side `/new <name>` command.
+        Restricting to a channel prevents collisions across per-agent rooms.
+        """
+        if channel is None:
+            row = (
+                self._c()
+                .execute(
+                    "SELECT * FROM sessions WHERE name = ? " "ORDER BY last_event_at DESC LIMIT 1",
+                    (name,),
+                )
+                .fetchone()
+            )
+        else:
+            row = (
+                self._c()
+                .execute(
+                    "SELECT * FROM sessions WHERE name = ? AND slack_channel = ? "
+                    "ORDER BY last_event_at DESC LIMIT 1",
+                    (name, channel),
+                )
+                .fetchone()
+            )
+        return _row_to_session(row) if row else None
+
+    def reserve_name(self, name: str, channel: str, thread_ts: str) -> str:
+        """Insert a placeholder session row that owns *name* until a real CC binds.
+
+        Returns the synthetic cc_session_id of the placeholder. When a real
+        session later calls /rn with this name, `claim_name` transfers the
+        thread off the placeholder (which is then a harmless dust row).
+        """
+        synthetic_sid = f"reserved:{uuid.uuid4()}"
+        now = int(time.time())
+        self._c().execute(
+            "INSERT INTO sessions(cc_session_id, agent, name, cwd, "
+            "slack_channel, slack_thread_ts, created_at, last_event_at, status) "
+            "VALUES (?, 'claude', ?, '(reserved)', ?, ?, ?, ?, 'reserved')",
+            (synthetic_sid, name, channel, thread_ts, now, now),
+        )
+        return synthetic_sid
 
     def claim_name(self, cc_session_id: str, name: str) -> str | None:
         """Claim `name` for `cc_session_id`. Returns prior holder's thread_ts (or None).

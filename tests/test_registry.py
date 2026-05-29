@@ -209,3 +209,46 @@ def test_claim_name_is_atomic(tmp_db_path: str) -> None:
     assert a is not None and a.name is None and a.slack_thread_ts is None
     assert b is not None and b.name == "shared" and b.slack_thread_ts == "T.1"
     reg.close()
+
+
+def test_reserve_name_creates_placeholder_and_lookup_finds_it(tmp_db_path: str) -> None:
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    sid = reg.reserve_name("kbd", "C-CLAUDE", "TOP.42")
+    assert sid.startswith("reserved:")
+    sess = reg.get_session_by_name("kbd", channel="C-CLAUDE")
+    assert sess is not None
+    assert sess.name == "kbd"
+    assert sess.slack_thread_ts == "TOP.42"
+    assert sess.status == "reserved"
+    assert sess.cc_session_id == sid
+    reg.close()
+
+
+def test_get_session_by_name_scoped_by_channel(tmp_db_path: str) -> None:
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.reserve_name("kbd", "C-A", "T.1")
+    assert reg.get_session_by_name("kbd", channel="C-A") is not None
+    assert reg.get_session_by_name("kbd", channel="C-B") is None
+    assert reg.get_session_by_name("kbd") is not None
+    reg.close()
+
+
+def test_real_session_claiming_reserved_name_inherits_thread(tmp_db_path: str) -> None:
+    """The reserved row holds the thread until a real CC binds via /rn."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.reserve_name("kbd", "C-CLAUDE", "TOP.42")
+    reg.upsert_session("real-sid", "/x", "main", "1", slack_channel="C-CLAUDE")
+    prior = reg.claim_name("real-sid", "kbd")
+    assert prior == "TOP.42"
+    real = reg.get_session("real-sid")
+    assert real is not None and real.slack_thread_ts == "TOP.42" and real.name == "kbd"
+    reg.close()

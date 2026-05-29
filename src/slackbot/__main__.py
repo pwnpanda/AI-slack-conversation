@@ -20,6 +20,7 @@ from slackbot.process_liveness import session_is_alive
 from slackbot.registry import Registry
 from slackbot.reply_router import ReplyRouter
 from slackbot.server import make_app
+from slackbot.slack_commands import SlackCommandHandler
 from slackbot.slack_io import SlackIO
 from slackbot.slack_poller import SlackPoller
 from slackbot.supervisor import Supervisor
@@ -101,6 +102,7 @@ async def amain() -> None:
     liveness = LivenessCache(session_is_alive)
     handlers = EventHandlers(reg, supervisor, slack_io)
     router = ReplyRouter(reg=reg, supervisor=supervisor, liveness=liveness, slack=slack_io)
+    commands = SlackCommandHandler(reg=reg, slack=slack_io)
 
     bolt = AsyncApp(token=cfg.slack_bot_token, client=web_client)
     loop = asyncio.get_running_loop()
@@ -132,12 +134,15 @@ async def amain() -> None:
         sd_notify.watchdog()
         if event.get("bot_id"):
             return
-        thread_ts = event.get("thread_ts")
-        if not thread_ts:
-            return
         text = event.get("text", "")
         msg_ts = event.get("ts", "")
         channel = event.get("channel", "")
+        thread_ts = event.get("thread_ts")
+        if not thread_ts:
+            # Top-level message — only slash-style commands like `/new <name>`
+            # are recognised here; everything else is silently ignored.
+            await commands.maybe_handle(channel=channel, text=text, msg_ts=msg_ts)
+            return
         await handle_thread_reply(channel, thread_ts, text, msg_ts)
 
     socket_handler = AsyncSocketModeHandler(bolt, cfg.slack_app_token)

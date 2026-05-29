@@ -194,6 +194,15 @@ class EventHandlers:
             ev.get("zellij_pane_id") or sess.zellij_pane_id,
             cc_pid,
         )
+        # Self-heal: an event arriving for a session previously marked ended
+        # means CC came back (auto-resume, manual restart). Flip status back
+        # and re-attach the transcript reader if needed. Without this, a
+        # stale session_end from an earlier exit can permanently mute the
+        # session even though CC is producing fresh transcript content.
+        if sess.status == "ended":
+            self._reg.set_status(sid, "active")
+        if sess.transcript_path:
+            self._sup.attach_reader(sid, sess.transcript_path)
 
 
 def _iso_now() -> str:
