@@ -12,9 +12,19 @@ if [ -z "$sid" ]; then
   exit 0
 fi
 
-# Enrich the notification with context: last assistant text + the tool_use that
-# is most likely the reason CC is asking for input. Lets the Slack reader see
-# what's being asked and reply with the option number.
+# Only fire on actual permission asks. Plain "Claude is waiting for your
+# input" notifications are noise in bypass-permissions mode, so the hook
+# drops them entirely instead of POSTing.
+case "$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')" in
+  *permission*|*approve*|*allow*|*needs\ your*) ;;
+  *)
+    printf '{}\n'
+    exit 0
+    ;;
+esac
+
+# Enrich with context: last assistant text + the most-recent tool_use, so
+# the Slack reader can answer with the option number.
 context=""
 tool_request=""
 if [ -n "$transcript" ] && [ -r "$transcript" ]; then
@@ -33,21 +43,13 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
     fi
   done < <(tac "$transcript" 2>/dev/null)
 
-  # Only attach the most-recent tool_use as "tool_request" when CC's message
-  # actually indicates a permission ask. Otherwise idle "waiting for input"
-  # notifications get mislabeled as approval prompts, which is especially
-  # noisy in bypass-permissions mode.
-  case "$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')" in
-    *permission*|*approve*|*allow*|*needs\ your*)
-      tool_request="$(tac "$transcript" 2>/dev/null \
-        | jq -r 'select(.message.role == "assistant") | .message.content
-                  | if type == "array" then
-                      (map(select(.type == "tool_use")) | last
-                        | if . then "\(.name)(\(.input | tojson))" else empty end)
-                    else empty end' 2>/dev/null \
-        | awk 'NF { print; exit }' || true)"
-      ;;
-  esac
+  tool_request="$(tac "$transcript" 2>/dev/null \
+    | jq -r 'select(.message.role == "assistant") | .message.content
+              | if type == "array" then
+                  (map(select(.type == "tool_use")) | last
+                    | if . then "\(.name)(\(.input | tojson))" else empty end)
+                else empty end' 2>/dev/null \
+    | awk 'NF { print; exit }' || true)"
 fi
 
 cc_pid="$PPID"
