@@ -169,6 +169,14 @@ journalctl --user -u claude-slack-bot -f
 - Matrix slash commands beyond `/new` (`/cc-list`, `/cc-mute`, `/cc-status`)
 - Verbose mode posting individual tool calls
 - Truncation-with-link for very long responses
+- **Dedicated `ai` zellij session for agent panes.** Today `/new` spawns
+  into the same zellij session the human is using, which steals focus.
+  Move all agent panes into a separate `ai` session (the `ZellijActuator`
+  already takes a session name per call). The `/new` command would spawn
+  a new pane/tab in `ai` instead of `main`; the human's `main` session is
+  never touched. Configurable via `SLACKBOT_NEW_PANE_ZELLIJ_SESSION`
+  already, but a one-time bootstrap (create `ai` session if missing,
+  attach the bot to it) would polish it.
 - **Multi-stage answer support.** CC's `AskUserQuestion` is multi-stage:
   pick an option, then provide a follow-up answer in a subsequent prompt.
   The bot currently treats every Matrix reply as a single typed string into
