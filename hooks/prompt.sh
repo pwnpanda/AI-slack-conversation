@@ -32,9 +32,9 @@ if [ -n "$name" ]; then
       zellij_session:$zs,zellij_pane_id:$zp,cc_pid:$cc_pid}')"
   if [ "$agent" = "codex" ] || [ "$agent" = "gemini" ]; then
     if post "$name_payload"; then
-      reason="Renamed Slack thread to $name"
+      reason="Renamed Matrix thread to $name"
     else
-      reason="Slackbot unavailable; rename command not sent to $agent"
+      reason="Matrix bridge unavailable; rename command not sent to $agent"
     fi
     printf '{}\n'
     printf '%s\n' "$reason" >&2

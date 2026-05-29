@@ -24,7 +24,7 @@ case "$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')" in
 esac
 
 # Enrich with context: last assistant text + the most-recent tool_use, so
-# the Slack reader can answer with the option number.
+# the Matrix reader can answer with the option number.
 context=""
 tool_request=""
 if [ -n "$transcript" ] && [ -r "$transcript" ]; then
