@@ -33,13 +33,21 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
     fi
   done < <(tac "$transcript" 2>/dev/null)
 
-  tool_request="$(tac "$transcript" 2>/dev/null \
-    | jq -r 'select(.message.role == "assistant") | .message.content
-              | if type == "array" then
-                  (map(select(.type == "tool_use")) | last
-                    | if . then "\(.name)(\(.input | tojson))" else empty end)
-                else empty end' 2>/dev/null \
-    | awk 'NF { print; exit }' || true)"
+  # Only attach the most-recent tool_use as "tool_request" when CC's message
+  # actually indicates a permission ask. Otherwise idle "waiting for input"
+  # notifications get mislabeled as approval prompts, which is especially
+  # noisy in bypass-permissions mode.
+  case "$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')" in
+    *permission*|*approve*|*allow*|*needs\ your*)
+      tool_request="$(tac "$transcript" 2>/dev/null \
+        | jq -r 'select(.message.role == "assistant") | .message.content
+                  | if type == "array" then
+                      (map(select(.type == "tool_use")) | last
+                        | if . then "\(.name)(\(.input | tojson))" else empty end)
+                    else empty end' 2>/dev/null \
+        | awk 'NF { print; exit }' || true)"
+      ;;
+  esac
 fi
 
 cc_pid="$PPID"

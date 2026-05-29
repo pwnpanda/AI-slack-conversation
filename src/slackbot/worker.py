@@ -100,7 +100,11 @@ class Worker:
         if uuid in self._posted_uuids:
             return
         await self._mark_pending_notification_resolved()
-        await self._mirror("response", {"text": ev.get("text", "")}, uuid)
+        data: dict[str, Any] = {"text": ev.get("text", "")}
+        tool_summary = ev.get("tool_summary")
+        if tool_summary:
+            data["tool_summary"] = tool_summary
+        await self._mirror("response", data, uuid)
 
     async def _on_notification(self, ev: dict[str, Any]) -> None:
         sess = self._reg.get_session(self._sid)

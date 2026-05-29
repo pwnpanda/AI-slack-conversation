@@ -117,6 +117,40 @@ def test_reader_ignores_non_text_assistant_content(tmp_path: Path) -> None:
     reader.close()
 
 
+def test_reader_attaches_tool_summary_when_text_and_tool_use_mixed(tmp_path: Path) -> None:
+    p = tmp_path / "tx.jsonl"
+    p.write_text("")
+    reader = TranscriptReader(p)
+    reader.open()
+    _append(
+        p,
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "parentUuid": "u1",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me look"},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "/x"}},
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                ],
+            },
+        },
+    )
+    events = list(reader.drain())
+    assert events == [
+        {
+            "kind": "response",
+            "uuid": "a1",
+            "parentUuid": "u1",
+            "text": "Let me look",
+            "tool_summary": "Read, Bash",
+        }
+    ]
+    reader.close()
+
+
 def test_reader_survives_file_truncation(tmp_path: Path) -> None:
     """If the file shrinks (rotation), the reader resets to offset 0."""
     p = tmp_path / "tx.jsonl"

@@ -30,6 +30,24 @@ def _extract_text(content: Any) -> str:
     return ""
 
 
+def _extract_tool_summary(content: Any) -> str:
+    """Return a brief comma-joined list of tool_use names, or '' if none.
+
+    Without this, an assistant turn whose content is mostly tool_use blocks
+    plus a one-line preamble mirrors as just the preamble, losing all context
+    about what Claude actually did in that turn.
+    """
+    if not isinstance(content, list):
+        return ""
+    names: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            name = block.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+    return ", ".join(names)
+
+
 _FINGERPRINT_BYTES = 64
 
 
@@ -135,5 +153,14 @@ class TranscriptReader:
             text = _extract_text(content)
             if not text:
                 return None
-            return {"kind": "response", "uuid": uuid, "parentUuid": parent, "text": text}
+            event: dict[str, Any] = {
+                "kind": "response",
+                "uuid": uuid,
+                "parentUuid": parent,
+                "text": text,
+            }
+            tool_summary = _extract_tool_summary(content)
+            if tool_summary:
+                event["tool_summary"] = tool_summary
+            return event
         return None
