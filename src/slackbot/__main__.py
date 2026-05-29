@@ -7,20 +7,17 @@ import logging
 import signal
 
 from aiohttp import web
-from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
-from slack_bolt.async_app import AsyncApp
-from slack_sdk.web.async_client import AsyncWebClient
+from nio import AsyncClient, RoomMessageText, SyncResponse
 
 from slackbot import sd_notify
 from slackbot.config import load_config
 from slackbot.handlers import EventHandlers
 from slackbot.logging_setup import configure as configure_logging
+from slackbot.matrix_commands import MatrixCommandHandler
+from slackbot.matrix_io import MatrixIO
 from slackbot.registry import Registry
 from slackbot.reply_router import ReplyRouter
 from slackbot.server import make_app
-from slackbot.slack_commands import SlackCommandHandler
-from slackbot.slack_io import SlackIO
-from slackbot.slack_poller import SlackPoller
 from slackbot.supervisor import Supervisor
 from slackbot.zellij_io import ZellijActuator
 
@@ -29,7 +26,6 @@ log = logging.getLogger("slackbot.main")
 _READER_POLL_INTERVAL = 0.5
 _REAPER_INTERVAL = 30.0
 _WATCHDOG_INTERVAL = 60.0
-_PING_CHECK_INTERVAL = 60.0
 
 
 async def reader_pump(supervisor: Supervisor) -> None:
@@ -56,100 +52,90 @@ async def watchdog_heartbeat() -> None:
         sd_notify.watchdog()
 
 
-async def socket_health_watchdog(socket_handler: AsyncSocketModeHandler) -> None:
-    """Force a Socket Mode reconnect only on positive evidence of a stuck socket.
-
-    `is_ping_pong_failing()` is the SDK's own liveness signal: PING/PONG flow
-    every ~10s between client and Slack independently of user activity. If it
-    stops flowing, the socket is dead. Mere absence of message events is NOT
-    evidence of breakage — quiet conversations are normal.
-    """
-    while True:
-        await asyncio.sleep(_PING_CHECK_INTERVAL)
-        client = socket_handler.client
-        if client is None:
-            continue
-        try:
-            if not await client.is_connected():
-                continue  # Bolt's own reconnect logic handles disconnected sockets
-            if await client.is_ping_pong_failing():
-                log.warning("Socket Mode ping/pong failing — forcing reconnect")
-                await client.disconnect()
-                await asyncio.sleep(1)
-                await client.connect()
-        except Exception:
-            log.exception("watchdog check failed")
-
-
 async def amain() -> None:
     cfg = load_config()
     configure_logging(cfg.log_level)
     log.info(
-        "starting claude-slack-bot port=%d channel=%s",
+        "starting claude-slack-bot port=%d default_room=%s",
         cfg.port,
-        cfg.slack_channel_id,
+        cfg.matrix_default_room,
     )
 
     reg = Registry(cfg.db_path)
     reg.open()
 
-    web_client = AsyncWebClient(token=cfg.slack_bot_token)
-    slack_io = SlackIO(web_client, cfg.slack_channel_id, cfg.agent_channels)
+    client = AsyncClient(
+        cfg.matrix_homeserver,
+        cfg.matrix_user_id,
+        device_id=cfg.matrix_device_id,
+    )
+    # A single-user bot does not need libolm/store state for v1 — we just
+    # set the access token directly and let sync_forever handle reconnects.
+    client.access_token = cfg.matrix_access_token
+    client.user_id = cfg.matrix_user_id
+    client.device_id = cfg.matrix_device_id
+
+    matrix_io = MatrixIO(client, cfg.matrix_default_room, cfg.agent_rooms)
     actuator = ZellijActuator()
-    supervisor = Supervisor(reg=reg, slack=slack_io, actuator=actuator)
-    handlers = EventHandlers(reg, supervisor, slack_io)
-    router = ReplyRouter(reg=reg, supervisor=supervisor, slack=slack_io)
-    commands = SlackCommandHandler(
+    supervisor = Supervisor(reg=reg, matrix=matrix_io, actuator=actuator)
+    handlers = EventHandlers(reg, supervisor, matrix_io)
+    router = ReplyRouter(reg=reg, supervisor=supervisor, matrix=matrix_io)
+    commands = MatrixCommandHandler(
         reg=reg,
-        slack=slack_io,
+        matrix=matrix_io,
         actuator=actuator,
         zellij_session=cfg.new_pane_zellij_session,
         new_pane_command=cfg.new_pane_command,
         new_pane_delay_seconds=cfg.new_pane_delay_seconds,
     )
 
-    bolt = AsyncApp(token=cfg.slack_bot_token, client=web_client)
     loop = asyncio.get_running_loop()
 
-    # Bolt's on_message AND the poller both call this. Dedupe by Slack's msg_ts
-    # so a message delivered via both paths only gets actuated once.
-    delivered_msg_ts: set[str] = set()
+    # Dedupe by Matrix event_id so a message delivered via the on_room_message
+    # callback (and potentially also via initial sync replay) only gets
+    # actuated once.
+    delivered_event_ids: set[str] = set()
     _DEDUPE_CAP = 4096
 
-    async def handle_thread_reply(channel: str, thread_ts: str, text: str, msg_ts: str) -> None:
-        if msg_ts in delivered_msg_ts:
+    async def handle_thread_reply(room_id: str, thread_root: str, text: str, event_id: str) -> None:
+        if event_id in delivered_event_ids:
             return
-        delivered_msg_ts.add(msg_ts)
+        delivered_event_ids.add(event_id)
         # Bounded LRU-ish: drop arbitrary half when cap exceeded.
-        if len(delivered_msg_ts) > _DEDUPE_CAP:
-            for x in list(delivered_msg_ts)[: _DEDUPE_CAP // 2]:
-                delivered_msg_ts.discard(x)
+        if len(delivered_event_ids) > _DEDUPE_CAP:
+            for x in list(delivered_event_ids)[: _DEDUPE_CAP // 2]:
+                delivered_event_ids.discard(x)
         log.info(
-            "thread reply received: channel=%s thread_ts=%s msg_ts=%s len=%d",
-            channel,
-            thread_ts,
-            msg_ts,
+            "thread reply received: room=%s thread_root=%s event_id=%s len=%d",
+            room_id,
+            thread_root,
+            event_id,
             len(text),
         )
-        await router.on_reply(channel=channel, thread_ts=thread_ts, text=text, msg_ts=msg_ts)
+        await router.on_reply(room_id=room_id, thread_root=thread_root, text=text, msg_ts=event_id)
 
-    @bolt.event("message")
-    async def on_message(event, logger):
+    async def on_room_message(room, event) -> None:
         sd_notify.watchdog()
-        if event.get("bot_id"):
+        if event.sender == client.user_id:
+            return  # ignore our own messages
+        content = event.source.get("content", {}) if hasattr(event, "source") else {}
+        relates = content.get("m.relates_to") or {}
+        text = getattr(event, "body", "") or content.get("body", "")
+        # Top-level (non-threaded) messages may carry slash commands.
+        if relates.get("rel_type") != "m.thread":
+            await commands.maybe_handle(room_id=room.room_id, text=text, msg_ts=event.event_id)
             return
-        text = event.get("text", "")
-        msg_ts = event.get("ts", "")
-        channel = event.get("channel", "")
-        thread_ts = event.get("thread_ts")
-        if not thread_ts:
-            # Top-level message — only slash-style commands like `/new <name>`
-            # are recognised here; everything else is silently ignored.
-            await commands.maybe_handle(channel=channel, text=text, msg_ts=msg_ts)
+        thread_root = relates.get("event_id")
+        if not thread_root:
             return
-        await handle_thread_reply(channel, thread_ts, text, msg_ts)
+        await handle_thread_reply(room.room_id, thread_root, text, event.event_id)
 
-    socket_handler = AsyncSocketModeHandler(bolt, cfg.slack_app_token)
+    def _on_sync(_response) -> None:
+        sd_notify.watchdog()
+
+    client.add_event_callback(on_room_message, RoomMessageText)
+    client.add_response_callback(_on_sync, SyncResponse)
+
     http_app = make_app(handlers)
     http_runner = web.AppRunner(http_app)
     await http_runner.setup()
@@ -179,18 +165,13 @@ async def amain() -> None:
         loop.add_signal_handler(sig, stop_event.set)
 
     tasks: list[asyncio.Task] = []
-    tasks.append(asyncio.create_task(socket_handler.start_async()))
+    # sync_forever does its own retry on transient errors; HTTP failures bubble
+    # up and crash the task, which is the desired behaviour — Restart=on-failure
+    # gives us a clean restart with no lingering state.
+    tasks.append(asyncio.create_task(client.sync_forever(timeout=30000, full_state=False)))
     tasks.append(asyncio.create_task(reader_pump(supervisor)))
     tasks.append(asyncio.create_task(reaper(supervisor)))
     tasks.append(asyncio.create_task(watchdog_heartbeat()))
-    tasks.append(asyncio.create_task(socket_health_watchdog(socket_handler)))
-    poller = SlackPoller(
-        reg=reg,
-        client=web_client,
-        deliver=handle_thread_reply,
-        interval_seconds=15.0,
-    )
-    tasks.append(asyncio.create_task(poller.run()))
 
     try:
         await stop_event.wait()
@@ -199,6 +180,7 @@ async def amain() -> None:
         for t in tasks:
             t.cancel()
         await supervisor.shutdown()
+        await client.close()
         await http_runner.cleanup()
         reg.close()
 
