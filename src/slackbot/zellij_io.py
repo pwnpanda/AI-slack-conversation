@@ -41,14 +41,41 @@ class ZellijActuator:
         steal focus between the new-pane and the write-chars. The sleep
         blocks other zellij actuations for delay_seconds — acceptable at
         single-user scale; tune via SLACKBOT_NEW_PANE_DELAY_SECONDS.
+
+        Fails with a helpful message if the target session doesn't exist;
+        the user is expected to keep the agent-only session (e.g. "ai")
+        permanently alive via the systemd unit at systemd/zellij-ai.service
+        or by running it manually once.
         """
         if not command_argv:
             raise ZellijError("spawn_pane_with_command requires a non-empty command")
+        if not await self._session_exists(session):
+            raise ZellijError(
+                f"zellij session '{session}' is not running. "
+                f"Start it once with `zellij --session {session}` (Ctrl+q to "
+                f"detach), or enable the systemd unit at "
+                f"systemd/zellij-ai.service to keep it always up."
+            )
         async with self._lock:
             await self._zellij(session, "action", "new-pane", "--", *command_argv)
             await asyncio.sleep(delay_seconds)
             await self._zellij(session, "action", "write-chars", initial_text)
             await self._zellij(session, "action", "write", "13")
+
+    async def _session_exists(self, session: str) -> bool:
+        """True iff *session* appears in `zellij list-sessions --short -n`."""
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["zellij", "list-sessions", "--short", "--no-formatting"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            # No sessions at all is the documented exit-code-1 case.
+            return False
+        names = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        return session in names
 
     async def _zellij(self, session: str, *args: str, allow_already: bool = False) -> None:
         cmd = ["zellij", "--session", session, *args]

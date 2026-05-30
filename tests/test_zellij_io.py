@@ -7,11 +7,26 @@ import pytest
 from slackbot.zellij_io import ZellijActuator, ZellijError
 
 
-def _make_fake_zellij(bin_dir: Path, *, exit_code: int = 0, log_file: Path | None = None) -> None:
+def _make_fake_zellij(
+    bin_dir: Path,
+    *,
+    exit_code: int = 0,
+    log_file: Path | None = None,
+    known_sessions: tuple[str, ...] = ("main", "ai"),
+) -> None:
     script = bin_dir / "zellij"
     log_path = str(log_file) if log_file else "/dev/null"
+    # `list-sessions --short --no-formatting` is what _session_exists uses;
+    # emit one name per line for matching. All other invocations log + exit.
+    sessions_block = "\\n".join(known_sessions)
     script.write_text(
         f"""#!/usr/bin/env bash
+case "$*" in
+  "list-sessions --short --no-formatting"|"list-sessions -s -n"|"list-sessions -n -s")
+    printf '{sessions_block}\\n'
+    exit 0
+    ;;
+esac
 echo "$@" >> {log_path}
 exit {exit_code}
 """
@@ -156,3 +171,29 @@ async def test_spawn_pane_rejects_empty_argv() -> None:
         await act.spawn_pane_with_command(
             session="main", command_argv=(), initial_text="/rn x", delay_seconds=0.0
         )
+
+
+@pytest.mark.asyncio
+async def test_spawn_pane_errors_when_target_session_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the agent-only zellij session ('ai') is not running, /new must
+    fail loudly with a clear bootstrap hint rather than silently dropping
+    panes into the wrong place or hanging on a missing-session error."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_file = tmp_path / "calls.log"
+    _make_fake_zellij(bin_dir, log_file=log_file, known_sessions=("main",))
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    act = ZellijActuator()
+    with pytest.raises(ZellijError) as exc_info:
+        await act.spawn_pane_with_command(
+            session="ai",
+            command_argv=("claude",),
+            initial_text="/rn x",
+            delay_seconds=0.0,
+        )
+    msg = str(exc_info.value)
+    assert "ai" in msg and "not running" in msg
+    # The new-pane action must NOT have been attempted.
+    assert not log_file.exists() or "new-pane" not in log_file.read_text()

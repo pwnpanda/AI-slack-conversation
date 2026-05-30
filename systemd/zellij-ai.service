@@ -1,0 +1,19 @@
+[Unit]
+Description=Keep a detached zellij session named "ai" always running for agent panes
+After=default.target
+
+[Service]
+Type=simple
+# zellij is a TUI but will accept a closed stdin and a "fake" PTY here.
+# We run it under `script` so it gets a pseudo-terminal without binding to
+# any real one — the session stays alive in the background and bot-spawned
+# /new panes attach to it via `zellij action new-pane`.
+ExecStart=/usr/bin/script -qec "/usr/bin/zellij --session ai" /dev/null
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

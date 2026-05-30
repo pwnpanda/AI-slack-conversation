@@ -161,6 +161,13 @@ journalctl --user -u claude-slack-bot -f
 - Reply routing: thread reply → `zellij action write-chars` into the originating pane
 - ✅/⚠️/🚫 Unicode reactions confirming delivery state
 - `/new <name>` top-level command spawns a new CC pane and types `/rn <name>` into it
+- **Dedicated `ai` zellij session for agent panes.** `/new` spawns into the
+  `ai` session by default, never touching your `main` workspace. The `ai`
+  session must be running — install `systemd/zellij-ai.service`
+  (`systemctl --user enable --now zellij-ai`) for the always-on path, or
+  run `zellij --session ai` in any pane once and press Ctrl+q to detach.
+  If `ai` is down when `/new` fires, the bot posts a clear error pointing
+  at the bootstrap command. Configurable via `SLACKBOT_NEW_PANE_ZELLIJ_SESSION`.
 - Idempotent hook installer
 
 ## Planned features
@@ -169,14 +176,6 @@ journalctl --user -u claude-slack-bot -f
 - Matrix slash commands beyond `/new` (`/cc-list`, `/cc-mute`, `/cc-status`)
 - Verbose mode posting individual tool calls
 - Truncation-with-link for very long responses
-- **Dedicated `ai` zellij session for agent panes.** Today `/new` spawns
-  into the same zellij session the human is using, which steals focus.
-  Move all agent panes into a separate `ai` session (the `ZellijActuator`
-  already takes a session name per call). The `/new` command would spawn
-  a new pane/tab in `ai` instead of `main`; the human's `main` session is
-  never touched. Configurable via `SLACKBOT_NEW_PANE_ZELLIJ_SESSION`
-  already, but a one-time bootstrap (create `ai` session if missing,
-  attach the bot to it) would polish it.
 - **Multi-stage answer support.** CC's `AskUserQuestion` is multi-stage:
   pick an option, then provide a follow-up answer in a subsequent prompt.
   The bot currently treats every Matrix reply as a single typed string into

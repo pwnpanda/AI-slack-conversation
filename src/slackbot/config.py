@@ -21,7 +21,7 @@ class Config:
     log_level: str
     # /new <name> spawns a CC pane in this zellij session and types "/rn <name>"
     # into it after a short delay. Override via env when zellij session differs.
-    new_pane_zellij_session: str = "main"
+    new_pane_zellij_session: str = "ai"
     new_pane_command: tuple[str, ...] = ("claude", "--dangerously-skip-permissions")
     new_pane_delay_seconds: float = 5.0
 
@@ -68,7 +68,7 @@ def load_config() -> Config:
         port=int(os.environ.get("SLACKBOT_PORT", "8787")),
         db_path=os.environ.get("SLACKBOT_DB_PATH") or _default_db_path(),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
-        new_pane_zellij_session=os.environ.get("SLACKBOT_NEW_PANE_ZELLIJ_SESSION", "main"),
+        new_pane_zellij_session=os.environ.get("SLACKBOT_NEW_PANE_ZELLIJ_SESSION", "ai"),
         new_pane_command=_new_pane_command(),
         new_pane_delay_seconds=float(os.environ.get("SLACKBOT_NEW_PANE_DELAY_SECONDS", "5")),
     )
