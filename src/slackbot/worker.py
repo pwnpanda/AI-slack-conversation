@@ -1,5 +1,5 @@
 """Per-conversation worker. Owns the queue, mirrors transcript events to
-Slack, delivers Slack replies into the pane, suppresses delivery echo."""
+Matrix, delivers Matrix replies into the pane, suppresses delivery echo."""
 
 from __future__ import annotations
 
@@ -20,14 +20,14 @@ _MAX_REMEMBERED_UUIDS = 1000
 _MAX_PENDING_ECHO = 64
 
 
-class _SlackIOProto(Protocol):
-    def channel_for_agent(self, agent: str) -> str: ...
-    async def post_top_level(self, text: str, channel: str | None = None) -> str: ...
+class _MatrixIOProto(Protocol):
+    def room_for_agent(self, agent: str) -> str: ...
+    async def post_top_level(self, text: str, room_id: str | None = None) -> str: ...
     async def post_in_thread(
-        self, thread_ts: str, text: str, channel: str | None = None
+        self, thread_root: str, text: str, room_id: str | None = None
     ) -> str: ...
-    async def edit_top_level(self, ts: str, text: str, channel: str | None = None) -> None: ...
-    async def react(self, ts: str, emoji: str, channel: str | None = None) -> None: ...
+    async def edit_top_level(self, ts: str, text: str, room_id: str | None = None) -> None: ...
+    async def react(self, ts: str, emoji: str, room_id: str | None = None) -> None: ...
 
 
 class _ActuatorProto(Protocol):
@@ -39,12 +39,12 @@ class Worker:
         self,
         sid: str,
         reg: Registry,
-        slack: _SlackIOProto,
+        matrix: _MatrixIOProto,
         actuator: _ActuatorProto,
     ) -> None:
         self._sid = sid
         self._reg = reg
-        self._slack = slack
+        self._matrix = matrix
         self._actuator = actuator
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
@@ -116,48 +116,48 @@ class Worker:
             "context": ev.get("context", ""),
             "agent": sess.agent,
         }
-        if sess.name is None or sess.slack_thread_ts is None:
+        if sess.name is None or sess.matrix_thread_root is None:
             self._reg.buffer_event(self._sid, "notification", json.dumps(data))
             return
         await self._mark_pending_notification_resolved()
         text = format_event("notification", data)
-        ts = await self._slack.post_in_thread(
-            sess.slack_thread_ts, text, channel=sess.slack_channel
+        event_id = await self._matrix.post_in_thread(
+            sess.matrix_thread_root, text, room_id=sess.matrix_room_id
         )
         # Persist so the resolved-marker edit survives reaping + restart.
-        self._reg.set_pending_notification(self._sid, ts, text, sess.slack_channel)
+        self._reg.set_pending_notification(self._sid, event_id, text, sess.matrix_room_id)
 
     async def _on_error(self, ev: dict[str, Any]) -> None:
         await self._mark_pending_notification_resolved()
         await self._mirror("error", {"text": ev.get("text", "")}, uuid=None)
 
-    async def _on_slack_reply(self, ev: dict[str, Any]) -> None:
+    async def _on_matrix_reply(self, ev: dict[str, Any]) -> None:
         text = ev["text"]
         msg_ts = ev.get("msg_ts", "")
         sess = self._reg.get_session(self._sid)
         if sess is None:
             return
-        channel = sess.slack_channel
+        room_id = sess.matrix_room_id
         if not sess.zellij_session or not sess.zellij_pane_id:
-            await self._slack.post_in_thread(
-                sess.slack_thread_ts or "",
+            await self._matrix.post_in_thread(
+                sess.matrix_thread_root or "",
                 "❌ delivery failed: session has no pane info",
-                channel=channel,
+                room_id=room_id,
             )
             return
         try:
             await self._actuator.deliver(sess.zellij_session, sess.zellij_pane_id, text)
         except Exception as exc:
-            await self._slack.post_in_thread(
-                sess.slack_thread_ts or "",
+            await self._matrix.post_in_thread(
+                sess.matrix_thread_root or "",
                 f"❌ delivery failed: {exc}",
-                channel=channel,
+                room_id=room_id,
             )
-            await self._slack.react(msg_ts, "warning", channel=channel)
+            await self._matrix.react(msg_ts, "warning", room_id=room_id)
             return
         self._remember_echo(text)
         await self._mark_pending_notification_resolved()
-        await self._slack.react(msg_ts, "white_check_mark", channel=channel)
+        await self._matrix.react(msg_ts, "white_check_mark", room_id=room_id)
 
     async def _mark_pending_notification_resolved(self) -> None:
         """Edit the previously posted notification to indicate it's no longer
@@ -166,10 +166,10 @@ class Worker:
         if pending is None:
             return
         try:
-            await self._slack.edit_top_level(
+            await self._matrix.edit_top_level(
                 pending["ts"],
                 pending["text"] + "\n_— resolved —_",
-                channel=(pending.get("channel") or None),
+                room_id=(pending.get("room_id") or None),
             )
         except Exception:
             log.exception("worker[%s] failed to mark notification resolved", self._sid)
@@ -178,12 +178,14 @@ class Worker:
         sess = self._reg.get_session(self._sid)
         if sess is None:
             return
-        if sess.name is None or sess.slack_thread_ts is None:
+        if sess.name is None or sess.matrix_thread_root is None:
             # Buffer for replay when /rn or auto-recovery binds the thread.
             self._reg.buffer_event(self._sid, kind, json.dumps({**data, "agent": sess.agent}))
             return
         text = format_event(kind, {**data, "agent": sess.agent})
-        await self._slack.post_in_thread(sess.slack_thread_ts, text, channel=sess.slack_channel)
+        await self._matrix.post_in_thread(
+            sess.matrix_thread_root, text, room_id=sess.matrix_room_id
+        )
         if uuid:
             self._remember_uuid(uuid)
 

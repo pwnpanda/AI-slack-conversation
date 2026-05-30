@@ -10,10 +10,12 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Config:
-    slack_bot_token: str
-    slack_app_token: str
-    slack_channel_id: str
-    agent_channels: dict[str, str]
+    matrix_homeserver: str
+    matrix_user_id: str
+    matrix_access_token: str
+    matrix_device_id: str
+    matrix_default_room: str
+    agent_rooms: dict[str, str]
     port: int
     db_path: str
     log_level: str
@@ -23,8 +25,8 @@ class Config:
     new_pane_command: tuple[str, ...] = ("claude", "--dangerously-skip-permissions")
     new_pane_delay_seconds: float = 5.0
 
-    def channel_for_agent(self, agent: str) -> str:
-        return self.agent_channels.get(agent.lower(), self.slack_channel_id)
+    def room_for_agent(self, agent: str) -> str:
+        return self.agent_rooms.get(agent.lower(), self.matrix_default_room)
 
 
 def _require(name: str) -> str:
@@ -39,13 +41,13 @@ def _default_db_path() -> str:
     return str(Path(state) / "claude-slack-bot" / "registry.db")
 
 
-def _agent_channels() -> dict[str, str]:
-    channels = {}
+def _agent_rooms() -> dict[str, str]:
+    rooms: dict[str, str] = {}
     for agent in ("claude", "codex", "gemini"):
-        channel = os.environ.get(f"SLACK_CHANNEL_ID_{agent.upper()}")
-        if channel:
-            channels[agent] = channel
-    return channels
+        room = os.environ.get(f"MATRIX_ROOM_ID_{agent.upper()}")
+        if room:
+            rooms[agent] = room
+    return rooms
 
 
 def _new_pane_command() -> tuple[str, ...]:
@@ -57,10 +59,12 @@ def _new_pane_command() -> tuple[str, ...]:
 
 def load_config() -> Config:
     return Config(
-        slack_bot_token=_require("SLACK_BOT_TOKEN"),
-        slack_app_token=_require("SLACK_APP_TOKEN"),
-        slack_channel_id=_require("SLACK_CHANNEL_ID"),
-        agent_channels=_agent_channels(),
+        matrix_homeserver=_require("MATRIX_HOMESERVER"),
+        matrix_user_id=_require("MATRIX_USER_ID"),
+        matrix_access_token=_require("MATRIX_ACCESS_TOKEN"),
+        matrix_device_id=_require("MATRIX_DEVICE_ID"),
+        matrix_default_room=_require("MATRIX_ROOM_ID"),
+        agent_rooms=_agent_rooms(),
         port=int(os.environ.get("SLACKBOT_PORT", "8787")),
         db_path=os.environ.get("SLACKBOT_DB_PATH") or _default_db_path(),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),

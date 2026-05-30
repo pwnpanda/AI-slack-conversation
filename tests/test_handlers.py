@@ -8,36 +8,36 @@ from slackbot.supervisor import Supervisor
 
 
 @dataclass
-class FakeSlackIO:
+class FakeMatrixIO:
     top_level_posts: list[str] = field(default_factory=list)
-    top_level_channels: list[str | None] = field(default_factory=list)
+    top_level_rooms: list[str | None] = field(default_factory=list)
     thread_posts: list[tuple[str, str]] = field(default_factory=list)
-    thread_channels: list[str | None] = field(default_factory=list)
+    thread_rooms: list[str | None] = field(default_factory=list)
     edits: list[tuple[str, str]] = field(default_factory=list)
-    edit_channels: list[str | None] = field(default_factory=list)
+    edit_rooms: list[str | None] = field(default_factory=list)
     reacts: list[tuple[str, str]] = field(default_factory=list)
-    _ts: int = 0
+    _seq: int = 0
 
-    def channel_for_agent(self, agent: str) -> str:
-        return f"C-{agent.upper()}"
+    def room_for_agent(self, agent: str) -> str:
+        return f"!{agent}:server"
 
-    async def post_top_level(self, text: str, channel: str | None = None) -> str:
+    async def post_top_level(self, text: str, room_id: str | None = None) -> str:
         self.top_level_posts.append(text)
-        self.top_level_channels.append(channel)
-        self._ts += 1
-        return f"top.{self._ts}"
+        self.top_level_rooms.append(room_id)
+        self._seq += 1
+        return f"$top.{self._seq}"
 
-    async def post_in_thread(self, thread_ts: str, text: str, channel: str | None = None) -> str:
-        self.thread_posts.append((thread_ts, text))
-        self.thread_channels.append(channel)
-        self._ts += 1
-        return f"thr.{self._ts}"
+    async def post_in_thread(self, thread_root: str, text: str, room_id: str | None = None) -> str:
+        self.thread_posts.append((thread_root, text))
+        self.thread_rooms.append(room_id)
+        self._seq += 1
+        return f"$thr.{self._seq}"
 
-    async def edit_top_level(self, ts: str, text: str, channel: str | None = None) -> None:
+    async def edit_top_level(self, ts: str, text: str, room_id: str | None = None) -> None:
         self.edits.append((ts, text))
-        self.edit_channels.append(channel)
+        self.edit_rooms.append(room_id)
 
-    async def react(self, ts: str, emoji: str, channel: str | None = None) -> None:
+    async def react(self, ts: str, emoji: str, room_id: str | None = None) -> None:
         self.reacts.append((ts, emoji))
 
 
@@ -55,13 +55,13 @@ def reg(tmp_db_path: str):
 
 
 @pytest.fixture
-def shared_slack():
-    return FakeSlackIO()
+def shared_matrix():
+    return FakeMatrixIO()
 
 
 @pytest.fixture
-def sup(reg: Registry, shared_slack: FakeSlackIO):
-    return Supervisor(reg=reg, slack=shared_slack, actuator=_NoopActuator())
+def sup(reg: Registry, shared_matrix: FakeMatrixIO):
+    return Supervisor(reg=reg, matrix=shared_matrix, actuator=_NoopActuator())
 
 
 def _start(sid: str = "s1", cwd: str = "/x", pane: str = "0", agent: str = "claude") -> dict:
@@ -78,8 +78,8 @@ def _start(sid: str = "s1", cwd: str = "/x", pane: str = "0", agent: str = "clau
 
 @pytest.mark.asyncio
 async def test_claude_start_creates_row(reg: Registry, sup: Supervisor) -> None:
-    slack = FakeSlackIO()
-    h = EventHandlers(reg, sup, slack)
+    matrix = FakeMatrixIO()
+    h = EventHandlers(reg, sup, matrix)
     await h.handle(_start())
     sess = reg.get_session("s1")
     assert sess is not None
@@ -90,42 +90,42 @@ async def test_claude_start_creates_row(reg: Registry, sup: Supervisor) -> None:
 
 @pytest.mark.asyncio
 async def test_codex_start_auto_registers(reg: Registry, sup: Supervisor) -> None:
-    slack = FakeSlackIO()
-    h = EventHandlers(reg, sup, slack)
+    matrix = FakeMatrixIO()
+    h = EventHandlers(reg, sup, matrix)
     await h.handle(_start(agent="codex"))
     sess = reg.get_session("s1")
     assert sess is not None
     assert sess.agent == "codex"
     assert sess.name is not None
     assert sess.name.startswith("codex-")
-    assert len(slack.top_level_posts) == 1
+    assert len(matrix.top_level_posts) == 1
     await sup.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_name_event_posts_top_level(reg: Registry, sup: Supervisor) -> None:
-    slack = FakeSlackIO()
-    h = EventHandlers(reg, sup, slack)
+    matrix = FakeMatrixIO()
+    h = EventHandlers(reg, sup, matrix)
     await h.handle(_start())
     await h.handle({"kind": "name", "session_id": "s1", "name": "myproj"})
-    assert slack.top_level_posts == ["🟢 [Claude] myproj  ·  /x"]
+    assert matrix.top_level_posts == ["🟢 [Claude] myproj  ·  /x"]
     sess = reg.get_session("s1")
     assert sess is not None and sess.name == "myproj"
-    assert sess.slack_thread_ts is not None
+    assert sess.matrix_thread_root is not None
     await sup.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_rename_edits_top_level(reg: Registry, sup: Supervisor) -> None:
-    slack = FakeSlackIO()
-    h = EventHandlers(reg, sup, slack)
+    matrix = FakeMatrixIO()
+    h = EventHandlers(reg, sup, matrix)
     await h.handle(_start())
     await h.handle({"kind": "name", "session_id": "s1", "name": "old"})
-    slack.edits.clear()
+    matrix.edits.clear()
     await h.handle({"kind": "name", "session_id": "s1", "name": "new"})
     # rename when row already has a name flows through claim_name then re-posts divider
     # OR edits top level - either path acceptable, but rename should NOT post a second top-level
-    assert len(slack.top_level_posts) == 1
+    assert len(matrix.top_level_posts) == 1
     sess = reg.get_session("s1")
     assert sess is not None and sess.name == "new"
     await sup.shutdown()
@@ -133,8 +133,8 @@ async def test_rename_edits_top_level(reg: Registry, sup: Supervisor) -> None:
 
 @pytest.mark.asyncio
 async def test_end_event_marks_status_ended(reg: Registry, sup: Supervisor) -> None:
-    slack = FakeSlackIO()
-    h = EventHandlers(reg, sup, slack)
+    matrix = FakeMatrixIO()
+    h = EventHandlers(reg, sup, matrix)
     await h.handle(_start())
     await h.handle({"kind": "name", "session_id": "s1", "name": "myproj"})
     await h.handle({"kind": "end", "session_id": "s1", "reason": "done"})
@@ -145,25 +145,25 @@ async def test_end_event_marks_status_ended(reg: Registry, sup: Supervisor) -> N
 
 @pytest.mark.asyncio
 async def test_resumed_start_edits_top_level_back_to_active(reg: Registry, sup: Supervisor) -> None:
-    slack = FakeSlackIO()
-    h = EventHandlers(reg, sup, slack)
+    matrix = FakeMatrixIO()
+    h = EventHandlers(reg, sup, matrix)
     await h.handle(_start())
     await h.handle({"kind": "name", "session_id": "s1", "name": "myproj"})
     await h.handle({"kind": "end", "session_id": "s1"})
-    slack.edits.clear()
+    matrix.edits.clear()
     # resume: same sid SessionStart
     await h.handle(_start(pane="2"))
     # An active-emoji edit posted (existing prior row had name+thread, so the resume edits)
-    assert any("🟢" in t for _, t in slack.edits)
+    assert any("🟢" in t for _, t in matrix.edits)
     await sup.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_notification_enqueues_into_worker(
-    reg: Registry, sup: Supervisor, shared_slack: FakeSlackIO
+    reg: Registry, sup: Supervisor, shared_matrix: FakeMatrixIO
 ) -> None:
-    # Handler and supervisor share the same slack so we can observe worker posts.
-    h = EventHandlers(reg, sup, shared_slack)
+    # Handler and supervisor share the same matrix so we can observe worker posts.
+    h = EventHandlers(reg, sup, shared_matrix)
     await h.handle(_start())
     await h.handle({"kind": "name", "session_id": "s1", "name": "myproj"})
     await h.handle({"kind": "notification", "session_id": "s1", "message": "needs input"})
@@ -172,22 +172,22 @@ async def test_notification_enqueues_into_worker(
 
     await asyncio.sleep(0.05)
     # The notification message should have been posted into the thread
-    assert any("needs input" in t for _, t in shared_slack.thread_posts)
+    assert any("needs input" in t for _, t in shared_matrix.thread_posts)
     await sup.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_auto_recover_only_when_predecessor_dead(reg: Registry, sup: Supervisor) -> None:
     """Auto-recovery uses session_is_alive — a still-running predecessor is NOT hijacked."""
-    slack = FakeSlackIO()
-    h = EventHandlers(reg, sup, slack)
+    matrix = FakeMatrixIO()
+    h = EventHandlers(reg, sup, matrix)
     # Set up a "predecessor" — current process counts as 'alive' because session_is_alive
     # with no info returns True. We can't easily simulate a dead predecessor in this test
     # without mocking, so just ensure that an existing-named row in the same cwd is NOT
     # auto-stolen by a new session.
     await h.handle(_start(sid="old", cwd="/proj"))
     await h.handle({"kind": "name", "session_id": "old", "name": "proj-name"})
-    slack.top_level_posts.clear()
+    matrix.top_level_posts.clear()
     await h.handle(_start(sid="new", cwd="/proj"))
     new_sess = reg.get_session("new")
     assert new_sess is not None
@@ -202,8 +202,8 @@ async def test_event_after_ended_self_heals_status_and_reattaches_reader(
     """A prompt/notification arriving for a session previously marked ended
     must flip status back to active and re-attach the transcript reader,
     so a stale session_end can't permanently mute the conversation."""
-    slack = FakeSlackIO()
-    h = EventHandlers(reg, sup, slack)
+    matrix = FakeMatrixIO()
+    h = EventHandlers(reg, sup, matrix)
     transcript = tmp_path / "tx.jsonl"
     transcript.write_text("")
     await h.handle(_start(sid="s1") | {"transcript_path": str(transcript)})

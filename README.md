@@ -1,16 +1,18 @@
 # claude-slack-bot
 
-Bridge between Claude Code, Codex, and Gemini CLI sessions and Slack: mirrors selected agent sessions into Slack threads, and types your Slack replies back into the originating Zellij pane.
+Bridge between Claude Code, Codex, and Gemini CLI sessions and Matrix: mirrors selected agent sessions into Matrix threads, and types your Matrix replies back into the originating Zellij pane.
+
+> Migrated from Slack to Matrix on the `matrix-port` branch. The repo name (`claude-slack-bot`) and Python package (`slackbot`) are unchanged from the Slack era; the transport underneath them is now Matrix.
 
 ## What this does
 
-Registers Claude sessions with `/rn <name>`, and auto-registers Codex/Gemini sessions because those CLIs do not provide the same custom slash-command path. The bot posts a top-level message naming the session and mirrors every subsequent prompt, response, and notification into the thread beneath it. Replying in that Slack thread types your reply into the originating Zellij pane (via `zellij action write-chars`).
+Registers Claude sessions with `/rn <name>`, and auto-registers Codex/Gemini sessions because those CLIs do not provide the same custom slash-command path. The bot posts a top-level message naming the session and mirrors every subsequent prompt, response, and notification into the thread beneath it. Replying in that Matrix thread types your reply into the originating Zellij pane (via `zellij action write-chars`).
 
 ## Use cases
 
 - Mobile notifications when CC asks for input or finishes a long-running turn
 - Reply to CC from your phone — text is typed into the live terminal session
-- Monitor multiple parallel CC sessions from one Slack channel
+- Monitor multiple parallel CC sessions from one Matrix room
 - Long-lived searchable archive of selected bug-bounty sessions
 
 ## Requirements
@@ -19,36 +21,38 @@ Registers Claude sessions with `/rn <name>`, and auto-registers Codex/Gemini ses
 - Python 3.13, `uv`
 - Zellij ≥ 0.44
 - `jq`, `curl` (for hook scripts)
-- A Slack workspace where you can create an app
+- A self-hosted Matrix homeserver (Continuwuity recommended; Synapse works too) reachable from the daemon host
+- A Matrix bot account with an access token
 - Claude Code CLI, Codex CLI, or Gemini CLI
 
 ## Installation / Setup
 
-### 1. Create the Slack app
+### 1. Provision the Matrix bot account + rooms
 
-1. Visit https://api.slack.com/apps → "Create New App" → "From scratch"
-2. Name: `claude-slack-bot`; pick your workspace
-3. **Socket Mode** → enable, generate app-level token (`xapp-...`)
-4. **OAuth & Permissions** → add bot scopes:
-   `chat:write`, `chat:write.public`, `channels:history`, `groups:history`,
-   `reactions:write`, `commands`, `app_mentions:read`
-5. **Event Subscriptions** → enable, subscribe to bot events: `message.channels`, `message.groups`, `app_mention`
-6. Install to workspace; copy `xoxb-...` bot token
-7. Invite the bot to the channel you'll use (e.g. `/invite @claude-slack-bot`)
-8. Right-click the channel → "Copy link" — the trailing path is the channel ID (`C0123…`)
+Server-side provisioning lives in `homelabs/Matrix/provision-users.sh` — run that on the Continuwuity LXC to create the `@ai-bot:chat.robinlunde.com` user, the human user, and the three per-agent rooms (`#claude`, `#codex`, `#gemini`). The script prints the bot's access token at the end; copy it into the env file in step 2.
+
+If you are setting this up against a different homeserver, the steps are:
+
+1. Register the bot user via your server's admin API (`POST /_synapse/admin/v2/users/...` for Synapse, equivalent admin command room on Continuwuity).
+2. Log in once as the bot via `POST /_matrix/client/v3/login` with `type=m.login.password` and persist the returned `access_token` + `device_id`.
+3. Create one room per agent (`#claude`, `#codex`, `#gemini`), invite the bot and your user, accept invites.
+4. Record each room's internal ID (`!abc:server`) — that is what the daemon needs, not the human-readable alias.
 
 ### 2. Create the env file
 
 ```bash
 mkdir -p ~/.config/claude-slack-bot
 cat > ~/.config/claude-slack-bot/env <<'EOF'
-SLACK_BOT_TOKEN=xoxb-…
-SLACK_APP_TOKEN=xapp-…
-SLACK_CHANNEL_ID=C…
-# Optional: route agents to separate Slack channels. Defaults to SLACK_CHANNEL_ID.
-# SLACK_CHANNEL_ID_CLAUDE=C…
-# SLACK_CHANNEL_ID_CODEX=C…
-# SLACK_CHANNEL_ID_GEMINI=C…
+MATRIX_HOMESERVER=https://chat.robinlunde.com
+MATRIX_USER_ID=@ai-bot:chat.robinlunde.com
+MATRIX_ACCESS_TOKEN=syt_...
+MATRIX_DEVICE_ID=slackbot-daemon
+# Fallback room used when an agent has no per-agent room set.
+MATRIX_ROOM_ID=!default:chat.robinlunde.com
+# Per-agent rooms.
+MATRIX_ROOM_ID_CLAUDE=!claude:chat.robinlunde.com
+MATRIX_ROOM_ID_CODEX=!codex:chat.robinlunde.com
+MATRIX_ROOM_ID_GEMINI=!gemini:chat.robinlunde.com
 SLACKBOT_PORT=8787
 LOG_LEVEL=INFO
 EOF
@@ -85,13 +89,17 @@ This installs the bridge hooks for Claude, Codex, and Gemini:
 
 All three post the same event contract to the daemon and include an agent label.
 
+### 5. Phone client
+
+Install **Element X** on Android (or iOS). Log in as your human user against `chat.robinlunde.com`. On Android, install the **ntfy** F-Droid app first and point it at `https://push.robinlunde.com` so Element X picks ntfy as its UnifiedPush distributor on first login (no Google FCM needed). See `docs/plan-matrix-migration.md` §4 for the full push wiring.
+
 ## Usage
 
 1. Start your agent inside a Zellij pane
 2. Claude: run `/rn my-session`; Codex/Gemini: the thread appears automatically
 3. Codex: optionally rename the thread with `rn my-session`; the hook blocks that control prompt from reaching the model
-4. Type prompts in the agent; they mirror into the Slack thread
-5. From Slack (mobile or desktop), reply in the thread — the text is typed into the agent pane (the pane briefly takes focus)
+4. Type prompts in the agent; they mirror into the Matrix thread
+5. From Element X (mobile or desktop), reply in the thread — the text is typed into the agent pane (the pane briefly takes focus)
 
 ## Testing
 
@@ -111,7 +119,7 @@ curl -s -H 'content-type: application/json' \
        "zellij_session":"main","zellij_pane_id":"0","resumed":false}' \
   http://127.0.0.1:8787/event
 
-# 2. name it (this triggers the Slack post)
+# 2. name it (this triggers the Matrix post)
 curl -s -H 'content-type: application/json' \
   -d '{"v":1,"kind":"name","session_id":"smoke","name":"smoke-test"}' \
   http://127.0.0.1:8787/event
@@ -127,7 +135,7 @@ curl -s -H 'content-type: application/json' \
   http://127.0.0.1:8787/event
 ```
 
-Then in Slack: reply to the thread; verify text appears typed into Zellij pane 0 (`zellij --session main attach` to view). Pane briefly steals focus — accepted cost.
+Then in Element X: reply to the thread; verify text appears typed into Zellij pane 0 (`zellij --session main attach` to view). Pane briefly steals focus — accepted cost.
 
 ## Deployment
 
@@ -141,23 +149,24 @@ journalctl --user -u claude-slack-bot -f
 
 - HTTP event endpoint at `http://127.0.0.1:8787/event`
 - SQLite-backed session/event registry
-- Slack Socket Mode listener (no inbound port required)
-- Top-level message per named session, thread per session lifetime
+- Matrix listener via `matrix-nio` `sync_forever` (no inbound port required)
+- Top-level message per named session, thread per session lifetime (`m.thread` relations)
 - Codex/Gemini auto-registration with names like `codex-project-abcdef12`
 - Portable Codex rename prompt: `rn my-session`
-- Agent labels in Slack messages: `[Claude]`, `[Codex]`, `[Gemini]`
-- Optional per-agent Slack channels via `SLACK_CHANNEL_ID_CLAUDE`, `SLACK_CHANNEL_ID_CODEX`, `SLACK_CHANNEL_ID_GEMINI`
+- Agent labels in Matrix messages: `[Claude]`, `[Codex]`, `[Gemini]`
+- Optional per-agent Matrix rooms via `MATRIX_ROOM_ID_CLAUDE`, `MATRIX_ROOM_ID_CODEX`, `MATRIX_ROOM_ID_GEMINI`
 - Event buffering for prompts that arrive before naming
 - Resume detection: same `session_id` → flips top-level back to 🟢
 - Name reclaim: new session adopting an existing name reuses the same thread
 - Reply routing: thread reply → `zellij action write-chars` into the originating pane
-- ✅/⚠️/🚫 emoji reactions confirming delivery state
+- ✅/⚠️/🚫 Unicode reactions confirming delivery state
+- `/new <name>` top-level command spawns a new CC pane and types `/rn <name>` into it
 - Idempotent hook installer
 
 ## Planned features
 
 - Multi-session-per-project disambiguation (currently 1:1 enforced)
-- `/cc-list`, `/cc-mute`, `/cc-status` slash commands
+- Matrix slash commands beyond `/new` (`/cc-list`, `/cc-mute`, `/cc-status`)
 - Verbose mode posting individual tool calls
 - Truncation-with-link for very long responses
 - **Dedicated `ai` zellij session for agent panes.** Today `/new` spawns
@@ -170,20 +179,22 @@ journalctl --user -u claude-slack-bot -f
   attach the bot to it) would polish it.
 - **Multi-stage answer support.** CC's `AskUserQuestion` is multi-stage:
   pick an option, then provide a follow-up answer in a subsequent prompt.
-  The bot currently treats every Slack reply as a single typed string into
+  The bot currently treats every Matrix reply as a single typed string into
   the pane, so a user replying with the full answer in one go can miss the
   intermediate "pick an option" step. Tracking the pending question state
   per session and routing replies through stages is open work.
+- Optional E2EE (requires `matrix-nio[e2e]` + libolm + per-device key
+  management). Out for v1 because the homeserver is on the LAN.
 
-## Worker redesign (2026-05-27)
+## Worker model
 
-The daemon now uses a worker-per-conversation model. Each `cc_session_id` owns
+The daemon uses a worker-per-conversation model. Each `cc_session_id` owns
 an asyncio Task + Queue + per-worker uuid-dedup set. A `TranscriptReader`
 tails the JSONL file CC writes; new user/assistant messages flow into the
-worker, which decides whether to mirror them to Slack (skipping uuids
-already posted, suppressing echoes from Slack-driven deliveries).
+worker, which decides whether to mirror them to Matrix (skipping uuids
+already posted, suppressing echoes from Matrix-driven deliveries).
 
-A `ReplyRouter` enqueues incoming Slack thread replies into the matching
+A `ReplyRouter` enqueues incoming Matrix thread replies into the matching
 worker. The global `ZellijActuator` still owns a single `asyncio.Lock` so the
 three-call `focus → write-chars → Enter` sequence is atomic across workers.
 
@@ -193,76 +204,37 @@ tokens), with a 10s TTL cache and the scan offloaded to `asyncio.to_thread`.
 The registry's `status` column is diagnostic only.
 
 systemd watchdog: the unit is `Type=notify`; daemon calls `sd_notify`
-on startup (`READY=1`), every 60s, and on every received Slack event.
-`WatchdogSec=600` so a hung daemon gets restarted within 10 minutes.
+on startup (`READY=1`), every 60s, and on every received Matrix sync
+response. `WatchdogSec=600` so a hung daemon gets restarted within 10
+minutes.
 
 After upgrading, restart your CC sessions once so the new `session_start.sh`
 runs and writes `transcript_path` into the registry. Existing rows without
 `transcript_path` keep working (the transcript reader isn't attached, but
-Slack replies still deliver and notifications still mirror).
+Matrix replies still deliver and notifications still mirror).
 
-## Known Slack Socket Mode silent failure + our mitigation (2026-05-28)
+## Migrated from Slack (2026-05-29)
 
-The slack-sdk Socket Mode client has a long-standing, well-documented bug: the
-WebSocket appears healthy (`is_connected()=True`, ping/pong flowing) but
-incoming events stop being dispatched to handlers. The user message is in the
-Slack channel; the bot never sees it.
+This bot started life on Slack Socket Mode. After repeated silent-event-drop
+incidents (`slack-sdk` issue [#1379](https://github.com/slackapi/python-slack-sdk/issues/1379)
+and friends) the transport was swapped for self-hosted Matrix per
+`docs/plan-matrix-migration.md`. The Slack-specific modules (`slack_io.py`,
+`slack_poller.py`, `slack_commands.py`) were deleted per the
+"replace, don't deprecate" policy; the worker model, transcript reader,
+registry, liveness check, and Zellij actuator carried over unchanged.
 
-Root cause (per [slack-sdk #1379](https://github.com/slackapi/python-slack-sdk/issues/1379)):
-`SocketModeClient.is_connected()` returns True whenever `current_session` is
-not None, without verifying the underlying socket is viable. The auto-reconnect
-logic therefore never trips.
-
-Reported repeatedly upstream — see [bolt-python #952](https://github.com/slackapi/bolt-python/issues/952),
-[bolt-python #470](https://github.com/slackapi/bolt-python/issues/470),
-[bolt-python #445](https://github.com/slackapi/bolt-python/issues/445),
-[slack-sdk #1110](https://github.com/slackapi/python-slack-sdk/issues/1110),
-[slack-sdk #1065](https://github.com/slackapi/python-slack-sdk/issues/1065).
-
-**Mitigations we apply**:
-1. **`is_ping_pong_failing()` watchdog** every 60s — forces reconnect on
-   positive evidence the socket is stale.
-2. **`SlackPoller`** every 15s — calls `conversations.replies` for every
-   thread we track and replays any messages we haven't seen via `msg_ts`.
-   This is the slack-sdk-team-recommended workaround (external watchdog) and
-   the only one that catches the silent-event-drop case where the socket
-   technically still passes ping/pong.
-3. **systemd `WatchdogSec=600`** — last-resort reset if the whole daemon hangs.
-
-The poller's cost at ~20 named sessions × 4 polls/min = 80 API calls/min,
-within Slack's tier-3 rate limit (50+/min per method, with burst tolerance).
-
-If Socket Mode is healthy, the poller has nothing to do — every message has
-already been processed by Bolt's `on_message` and recorded in the shared
-`delivered_msg_ts` set; the poller's findings are deduped against it.
-
-## Planned migration: Matrix / Element (self-hosted on Proxmox)
-
-Slack's Socket Mode reliability has cost more engineering time than the rest of
-this project combined. The poller is a workable mitigation but it's a patch on
-a vendor bug we cannot fix. The planned escape hatch:
-
-- **Target**: Matrix server (Synapse or Conduit) running as an LXC container
-  on Proxmox, paired with Element on phone + desktop for the user side.
-- **Why Matrix over Signal / Nextcloud Talk**:
-  - Threads are first-class (replies are organized, like Slack).
-  - The bot SDK (`matrix-nio` for Python) is stable and well-maintained.
-  - Self-hosted: no rate limits, no zombie WebSockets, no app store gatekeeping.
-  - Reactions are first-class.
-  - Federation gives an upgrade path if we ever want multi-user.
-  - Mobile push notifications work without app-store-tier hurdles.
-- **Scope of the port**: only `slack_io.py`, `slack_poller.py`, and the Bolt
-  wiring in `__main__.py` are Slack-specific. The worker model, transcript
-  reader, registry, liveness check, and Zellij actuator are messaging-agnostic.
-  Estimated effort: 1-2 days for a working port.
-
-Trigger for the migration: if the poller fails to recover the bot within
-its 15s window more than once a week, port to Matrix.
+The registry schema renamed `slack_channel` → `matrix_room_id` and
+`slack_thread_ts` → `matrix_thread_root`. On first start the new daemon
+detects a legacy DB and drops it, logging a warning — old Slack thread
+IDs would be meaningless under Matrix anyway. There is no two-way
+backwards-compat shim; if you ever need the Slack version back, check out
+the last pre-migration commit on `main`.
 
 ## Claude Sessions
 
 | Session | Summary | Date |
 |---------|---------|------|
+| `matrix-port` | Ported the daemon from Slack to Matrix (matrix-nio): replaced `slack_io`/`slack_poller`/`slack_commands`, renamed registry schema, rewrote `__main__` around `sync_forever`. | 2026-05-29 |
 | `debug-gemini-routing` | Fixed `rn` blocking for Gemini and verified Slack reply routing via trace logs. | 2026-05-25 |
 | `fix-rn-blocking` | Fixed `rn` command not blocking for Gemini; added debug logging to reply router. | 2026-05-25 |
 | `run-testing` | Ran full test suite to verify project health; all 57 tests passed. | 2026-05-25 |

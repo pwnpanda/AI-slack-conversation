@@ -2,23 +2,23 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from slackbot.matrix_commands import MatrixCommandHandler
 from slackbot.registry import Registry
-from slackbot.slack_commands import SlackCommandHandler
 
 
 @dataclass
-class _FakeSlack:
-    in_thread: list[tuple[str, str, str]] = field(default_factory=list)  # (thread, text, ch)
-    reactions: list[tuple[str, str, str]] = field(default_factory=list)  # (ts, emoji, ch)
-    _ts: int = 100
+class _FakeMatrix:
+    in_thread: list[tuple[str, str, str]] = field(default_factory=list)
+    reactions: list[tuple[str, str, str]] = field(default_factory=list)
+    _seq: int = 100
 
-    async def post_in_thread(self, thread_ts: str, text: str, channel: str | None = None) -> str:
-        self._ts += 1
-        self.in_thread.append((thread_ts, text, channel or ""))
-        return f"thr.{self._ts}"
+    async def post_in_thread(self, thread_root: str, text: str, room_id: str | None = None) -> str:
+        self._seq += 1
+        self.in_thread.append((thread_root, text, room_id or ""))
+        return f"$thr.{self._seq}"
 
-    async def react(self, ts: str, emoji: str, channel: str | None = None) -> None:
-        self.reactions.append((ts, emoji, channel or ""))
+    async def react(self, ts: str, emoji: str, room_id: str | None = None) -> None:
+        self.reactions.append((ts, emoji, room_id or ""))
 
 
 @dataclass
@@ -41,10 +41,10 @@ class _FakeActuator:
             raise self.raise_on_spawn
 
 
-def _handler(reg, slack, actuator=None):
-    return SlackCommandHandler(
+def _handler(reg, matrix, actuator=None):
+    return MatrixCommandHandler(
         reg=reg,
-        slack=slack,
+        matrix=matrix,
         actuator=actuator or _FakeActuator(),
         zellij_session="main",
         new_pane_command=("claude", "--dangerously-skip-permissions"),
@@ -56,10 +56,10 @@ def _handler(reg, slack, actuator=None):
 async def test_new_spawns_pane_and_types_rn_when_name_free(tmp_db_path: str) -> None:
     reg = Registry(tmp_db_path)
     reg.open()
-    slack = _FakeSlack()
+    matrix = _FakeMatrix()
     actuator = _FakeActuator()
-    cmd = _handler(reg, slack, actuator)
-    handled = await cmd.maybe_handle(channel="C-X", text="/new kbd", msg_ts="MSG.1")
+    cmd = _handler(reg, matrix, actuator)
+    handled = await cmd.maybe_handle(room_id="!x:server", text="/new kbd", msg_ts="$MSG1:server")
     assert handled is True
     assert len(actuator.spawns) == 1
     spawn = actuator.spawns[0]
@@ -67,7 +67,7 @@ async def test_new_spawns_pane_and_types_rn_when_name_free(tmp_db_path: str) -> 
     assert spawn["command_argv"] == ("claude", "--dangerously-skip-permissions")
     assert spawn["initial_text"] == "/rn kbd"
     # Hourglass before, checkmark after.
-    emojis = [r[1] for r in slack.reactions if r[0] == "MSG.1"]
+    emojis = [r[1] for r in matrix.reactions if r[0] == "$MSG1:server"]
     assert "hourglass_flowing_sand" in emojis
     assert "white_check_mark" in emojis
     reg.close()
@@ -77,17 +77,17 @@ async def test_new_spawns_pane_and_types_rn_when_name_free(tmp_db_path: str) -> 
 async def test_new_refuses_when_name_already_in_use(tmp_db_path: str) -> None:
     reg = Registry(tmp_db_path)
     reg.open()
-    reg.upsert_session("existing", "/x", "main", "1", slack_channel="C-X")
+    reg.upsert_session("existing", "/x", "main", "1", matrix_room_id="!x:server")
     reg.claim_name("existing", "kbd")
-    reg.set_thread_ts("existing", "T.OLD")
-    slack = _FakeSlack()
+    reg.set_matrix_thread_root("existing", "$TOLD:server")
+    matrix = _FakeMatrix()
     actuator = _FakeActuator()
-    cmd = _handler(reg, slack, actuator)
-    handled = await cmd.maybe_handle(channel="C-X", text="/new kbd", msg_ts="MSG.2")
+    cmd = _handler(reg, matrix, actuator)
+    handled = await cmd.maybe_handle(room_id="!x:server", text="/new kbd", msg_ts="$MSG2:server")
     assert handled is True
     assert actuator.spawns == []  # no pane spawned on collision
-    assert any("already in use" in t[1] for t in slack.in_thread)
-    assert ("MSG.2", "x", "C-X") in slack.reactions
+    assert any("already in use" in t[1] for t in matrix.in_thread)
+    assert ("$MSG2:server", "x", "!x:server") in matrix.reactions
     reg.close()
 
 
@@ -95,10 +95,10 @@ async def test_new_refuses_when_name_already_in_use(tmp_db_path: str) -> None:
 async def test_handler_ignores_non_command_text(tmp_db_path: str) -> None:
     reg = Registry(tmp_db_path)
     reg.open()
-    cmd = _handler(reg, _FakeSlack())
-    assert await cmd.maybe_handle(channel="C-X", text="hello there", msg_ts="m") is False
-    assert await cmd.maybe_handle(channel="C-X", text="/new", msg_ts="m") is False
-    assert await cmd.maybe_handle(channel="C-X", text="/newx foo", msg_ts="m") is False
+    cmd = _handler(reg, _FakeMatrix())
+    assert await cmd.maybe_handle(room_id="!x:server", text="hello there", msg_ts="m") is False
+    assert await cmd.maybe_handle(room_id="!x:server", text="/new", msg_ts="m") is False
+    assert await cmd.maybe_handle(room_id="!x:server", text="/newx foo", msg_ts="m") is False
     reg.close()
 
 
@@ -106,25 +106,25 @@ async def test_handler_ignores_non_command_text(tmp_db_path: str) -> None:
 async def test_spawn_failure_is_reported(tmp_db_path: str) -> None:
     reg = Registry(tmp_db_path)
     reg.open()
-    slack = _FakeSlack()
+    matrix = _FakeMatrix()
     actuator = _FakeActuator(raise_on_spawn=RuntimeError("zellij not running"))
-    cmd = _handler(reg, slack, actuator)
-    await cmd.maybe_handle(channel="C-X", text="/new kbd", msg_ts="MSG.3")
-    assert any("Failed to spawn new pane" in t[1] for t in slack.in_thread)
+    cmd = _handler(reg, matrix, actuator)
+    await cmd.maybe_handle(room_id="!x:server", text="/new kbd", msg_ts="$MSG3:server")
+    assert any("Failed to spawn new pane" in t[1] for t in matrix.in_thread)
     # Hourglass reaction set, but no success checkmark.
-    emojis = [r[1] for r in slack.reactions if r[0] == "MSG.3"]
+    emojis = [r[1] for r in matrix.reactions if r[0] == "$MSG3:server"]
     assert "hourglass_flowing_sand" in emojis
     assert "white_check_mark" not in emojis
     reg.close()
 
 
 @pytest.mark.asyncio
-async def test_name_uniqueness_is_per_channel(tmp_db_path: str) -> None:
+async def test_name_uniqueness_is_per_room(tmp_db_path: str) -> None:
     reg = Registry(tmp_db_path)
     reg.open()
-    reg.upsert_session("existing", "/x", "main", "1", slack_channel="C-A")
+    reg.upsert_session("existing", "/x", "main", "1", matrix_room_id="!a:server")
     reg.claim_name("existing", "kbd")
-    cmd = _handler(reg, _FakeSlack(), _FakeActuator())
-    # Same name in a different channel should be allowed.
-    assert await cmd.maybe_handle(channel="C-B", text="/new kbd", msg_ts="m") is True
+    cmd = _handler(reg, _FakeMatrix(), _FakeActuator())
+    # Same name in a different room should be allowed.
+    assert await cmd.maybe_handle(room_id="!b:server", text="/new kbd", msg_ts="m") is True
     reg.close()

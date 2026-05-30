@@ -18,13 +18,13 @@ class Supervisor:
     def __init__(
         self,
         reg: Registry,
-        slack,
+        matrix,
         actuator,
         idle_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._reg = reg
-        self._slack = slack
+        self._matrix = matrix
         self._actuator = actuator
         self._idle = idle_seconds
         self._clock = clock
@@ -36,7 +36,7 @@ class Supervisor:
         """Return the worker for *sid*, creating and starting one if needed."""
         worker = self._workers.get(sid)
         if worker is None:
-            worker = Worker(sid=sid, reg=self._reg, slack=self._slack, actuator=self._actuator)
+            worker = Worker(sid=sid, reg=self._reg, matrix=self._matrix, actuator=self._actuator)
             await worker.start()
             self._workers[sid] = worker
         self._last_touch[sid] = self._clock()

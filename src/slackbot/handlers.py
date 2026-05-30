@@ -18,10 +18,10 @@ log = logging.getLogger(__name__)
 
 
 class EventHandlers:
-    def __init__(self, reg: Registry, supervisor: Supervisor, slack) -> None:
+    def __init__(self, reg: Registry, supervisor: Supervisor, matrix) -> None:
         self._reg = reg
         self._sup = supervisor
-        self._slack = slack
+        self._matrix = matrix
 
     async def handle(self, event: dict[str, Any]) -> None:
         kind = event.get("kind", "")
@@ -40,7 +40,7 @@ class EventHandlers:
         sid = ev["session_id"]
         prior = self._reg.get_session(sid)
         agent = _agent(ev.get("agent"))
-        channel = self._slack.channel_for_agent(agent)
+        room_id = self._matrix.room_for_agent(agent)
         cwd = ev["cwd"]
         zellij_session = ev.get("zellij_session")
         cc_pid = _int_or_none(ev.get("cc_pid"))
@@ -52,7 +52,7 @@ class EventHandlers:
             zellij_session,
             ev.get("zellij_pane_id"),
             agent=agent,
-            slack_channel=channel,
+            matrix_room_id=room_id,
             cc_pid=cc_pid,
             transcript_path=transcript_path,
         )
@@ -61,11 +61,11 @@ class EventHandlers:
             self._sup.attach_reader(sid, transcript_path)
         await self._sup.get_or_create(sid)
 
-        if prior and prior.name and prior.slack_thread_ts:
-            await self._slack.edit_top_level(
-                prior.slack_thread_ts,
+        if prior and prior.name and prior.matrix_thread_root:
+            await self._matrix.edit_top_level(
+                prior.matrix_thread_root,
                 top_level_text(prior.name, prior.cwd, "active", prior.agent),
-                channel=prior.slack_channel,
+                room_id=prior.matrix_room_id,
             )
             return
 
@@ -113,17 +113,17 @@ class EventHandlers:
             assert sess is not None
             if prior_thread:
                 marker = "auto-rebound" if ev.get("auto_recovered") else "resumed"
-                await self._slack.post_in_thread(
+                await self._matrix.post_in_thread(
                     prior_thread,
                     f"─── 🔄 {marker} in new session @ {_iso_now()} ───",
-                    channel=sess.slack_channel,
+                    room_id=sess.matrix_room_id,
                 )
             else:
-                ts = await self._slack.post_top_level(
+                event_id = await self._matrix.post_top_level(
                     top_level_text(new_name, sess.cwd, "active", sess.agent),
-                    channel=sess.slack_channel,
+                    room_id=sess.matrix_room_id,
                 )
-                self._reg.set_thread_ts(sid, ts)
+                self._reg.set_matrix_thread_root(sid, event_id)
 
             # Replay buffered events into the worker.
             worker = await self._sup.get_or_create(sid)
@@ -135,22 +135,22 @@ class EventHandlers:
         else:
             # Rename: update the existing thread header in-place.
             self._reg.set_name(sid, new_name)
-            if sess.slack_thread_ts:
-                await self._slack.edit_top_level(
-                    sess.slack_thread_ts,
+            if sess.matrix_thread_root:
+                await self._matrix.edit_top_level(
+                    sess.matrix_thread_root,
                     top_level_text(new_name, sess.cwd, sess.status, sess.agent),
-                    channel=sess.slack_channel,
+                    room_id=sess.matrix_room_id,
                 )
 
     async def _on_end(self, ev: dict[str, Any]) -> None:
         sid = ev["session_id"]
         self._reg.set_status(sid, "ended")
         sess = self._reg.get_session(sid)
-        if sess and sess.name and sess.slack_thread_ts:
-            await self._slack.edit_top_level(
-                sess.slack_thread_ts,
+        if sess and sess.name and sess.matrix_thread_root:
+            await self._matrix.edit_top_level(
+                sess.matrix_thread_root,
                 top_level_text(sess.name, sess.cwd, "ended", sess.agent),
-                channel=sess.slack_channel,
+                room_id=sess.matrix_room_id,
             )
         self._sup.detach_reader(sid)
 
