@@ -6,7 +6,18 @@ import re
 from typing import Any
 
 _RN_PATTERN = re.compile(r"^(?:(?:[/#!](?:rn|rename|register))|rn)\s+(\S+)\s*$")
-_TRUNCATE_AT = 3000
+
+# Matrix events have a hard size ceiling (max_request_size, server-side
+# typically 64 KiB). We leave headroom for the JSON envelope, m.relates_to
+# fields, agent prefix, etc. Anything past this gets chunked across multiple
+# messages — never silently dropped. Single-line bodies are not chunked,
+# only multi-line ones where a sane split is obvious.
+_CHUNK_AT = 60_000
+# tool_request is the raw JSON for the tool the agent wants to run. It can be
+# enormous (entire file contents for an Edit, etc.) and would dominate the
+# notification message without adding information beyond what's in the
+# message line above it. Capped softly with an ellipsis hint.
+_TOOL_REQUEST_CAP = 1200
 
 
 def agent_label(agent: str | None) -> str:
@@ -27,8 +38,7 @@ def top_level_text(name: str, cwd: str, status: str, agent: str | None = None) -
 
 def _codeblock_if_multiline(text: str) -> str:
     if "\n" in text:
-        truncated = text if len(text) <= _TRUNCATE_AT else text[:_TRUNCATE_AT] + "\n…[truncated]"
-        return f"\n```\n{truncated}\n```"
+        return f"\n```\n{text}\n```"
     return f" {text}"
 
 
@@ -47,21 +57,45 @@ def format_event(kind: str, data: dict[str, Any]) -> str:
         parts = [f"{prefix}⏸ {msg}"]
         tool_request = str(data.get("tool_request", "")).strip()
         if tool_request:
-            # Truncate very long tool_request JSON so Slack stays readable.
-            tr = tool_request if len(tool_request) <= 400 else tool_request[:400] + "…"
+            tr = (
+                tool_request
+                if len(tool_request) <= _TOOL_REQUEST_CAP
+                else tool_request[:_TOOL_REQUEST_CAP] + "…"
+            )
             parts.append(f"_Asking permission for:_ `{tr}`")
             parts.append("_Reply `1` to approve, `2` to deny, `3` to allow for session._")
         ctx = str(data.get("context", "")).strip()
         if ctx:
-            # Show the tail so the question itself is visible without flooding the channel.
-            tail = "\n".join(ctx.splitlines()[-6:])
-            if tail:
-                tail_trunc = tail if len(tail) <= _TRUNCATE_AT else tail[:_TRUNCATE_AT] + "\n…"
-                parts.append(f"```\n{tail_trunc}\n```")
+            parts.append(f"```\n{ctx}\n```")
         return "\n".join(parts)
     if kind == "error":
         return f"{prefix}❌ {data.get('text', '')}"
     return f"{prefix}[{kind}] {data!r}"
+
+
+def chunk_for_matrix(text: str, limit: int = _CHUNK_AT) -> list[str]:
+    """Split *text* across Matrix-event-sized chunks without losing content.
+
+    Returns a single-element list when the text is already under *limit*.
+    For longer text, prefers splitting at newline boundaries; falls back
+    to a hard slice if a single line is longer than *limit*. Each chunk
+    after the first is prefixed with `…` so it's obvious in the thread
+    that the content is a continuation.
+    """
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = remaining.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    total = len(chunks)
+    return [c if i == 0 else f"…(part {i + 1}/{total})\n{c}" for i, c in enumerate(chunks)]
 
 
 def parse_rn_command(prompt_text: str) -> str | None:

@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Any, Protocol
 
-from slackbot.events import format_event
+from slackbot.events import chunk_for_matrix, format_event
 from slackbot.registry import Registry
 
 log = logging.getLogger(__name__)
@@ -134,11 +134,20 @@ class Worker:
             return
         await self._mark_pending_notification_resolved()
         text = format_event("notification", data)
-        event_id = await self._matrix.post_in_thread(
-            sess.matrix_thread_root, text, room_id=sess.matrix_room_id
+        chunks = chunk_for_matrix(text)
+        first_event_id = None
+        for chunk in chunks:
+            event_id = await self._matrix.post_in_thread(
+                sess.matrix_thread_root, chunk, room_id=sess.matrix_room_id
+            )
+            if first_event_id is None:
+                first_event_id = event_id
+        # Persist the first chunk's event_id so the resolved-marker edit
+        # lands on the head of the notification (not a continuation chunk).
+        assert first_event_id is not None
+        self._reg.set_pending_notification(
+            self._sid, first_event_id, chunks[0], sess.matrix_room_id
         )
-        # Persist so the resolved-marker edit survives reaping + restart.
-        self._reg.set_pending_notification(self._sid, event_id, text, sess.matrix_room_id)
 
     async def _on_error(self, ev: dict[str, Any]) -> None:
         await self._mark_pending_notification_resolved()
@@ -196,9 +205,10 @@ class Worker:
             self._reg.buffer_event(self._sid, kind, json.dumps({**data, "agent": sess.agent}))
             return
         text = format_event(kind, {**data, "agent": sess.agent})
-        await self._matrix.post_in_thread(
-            sess.matrix_thread_root, text, room_id=sess.matrix_room_id
-        )
+        for chunk in chunk_for_matrix(text):
+            await self._matrix.post_in_thread(
+                sess.matrix_thread_root, chunk, room_id=sess.matrix_room_id
+            )
         if uuid:
             self._remember_uuid(uuid)
 

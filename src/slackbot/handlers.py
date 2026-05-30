@@ -23,6 +23,9 @@ class EventHandlers:
         self._reg = reg
         self._sup = supervisor
         self._matrix = matrix
+        # Strong refs to in-flight background edit tasks so asyncio doesn't
+        # garbage-collect them mid-await (RUF006).
+        self._inflight_edits: set[asyncio.Task] = set()
 
     async def handle(self, event: dict[str, Any]) -> None:
         kind = event.get("kind", "")
@@ -224,14 +227,22 @@ class EventHandlers:
         new_cwd = ev.get("cwd")
         if new_cwd and sess.cwd in ("(unknown)", "") and new_cwd != sess.cwd:
             self._reg.upsert_session(
-                sid, new_cwd, sess.zellij_session, sess.zellij_pane_id,
-                agent=sess.agent, matrix_room_id=sess.matrix_room_id,
-                cc_pid=cc_pid, transcript_path=sess.transcript_path,
+                sid,
+                new_cwd,
+                sess.zellij_session,
+                sess.zellij_pane_id,
+                agent=sess.agent,
+                matrix_room_id=sess.matrix_room_id,
+                cc_pid=cc_pid,
+                transcript_path=sess.transcript_path,
             )
             if sess.name and sess.matrix_thread_root:
                 refreshed = self._reg.get_session(sid)
                 if refreshed:
-                    asyncio.create_task(self._edit_top_level_with_new_cwd(refreshed))
+                    # Hold the task reference (RUF006) so it isn't GC'd mid-flight.
+                    task = asyncio.create_task(self._edit_top_level_with_new_cwd(refreshed))
+                    self._inflight_edits.add(task)
+                    task.add_done_callback(self._inflight_edits.discard)
         # Self-heal: an event arriving for a session previously marked ended
         # means CC came back (auto-resume, manual restart). Flip status back
         # and re-attach the transcript reader if needed. Without this, a
