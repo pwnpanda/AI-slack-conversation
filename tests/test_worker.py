@@ -130,6 +130,30 @@ async def test_worker_suppresses_echoed_prompt_after_delivery(tmp_db_path: str) 
 
 
 @pytest.mark.asyncio
+async def test_worker_suppresses_echo_despite_trailing_whitespace(tmp_db_path: str) -> None:
+    """Element X appends a trailing space to message bodies; CC strips it when
+    recording the prompt. Echo suppression must survive that whitespace delta,
+    otherwise every Matrix reply gets mirrored back into its own thread."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+
+    # Delivered body carries Element X's trailing space.
+    await worker.enqueue({"kind": "matrix_reply", "text": "ping ", "msg_ts": "$MSG1:server"})
+    # Transcript reader sees CC's stripped prompt.
+    await worker.enqueue({"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "ping"})
+    await worker.stop()
+
+    assert matrix.posts == []  # no 👤 echo mirrored back
+    reg.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_mirrors_organic_prompt(tmp_db_path: str) -> None:
     """A prompt that didn't come from a Matrix delivery IS mirrored."""
     from slackbot.registry import Registry

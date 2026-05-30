@@ -20,6 +20,18 @@ _MAX_REMEMBERED_UUIDS = 1000
 _MAX_PENDING_ECHO = 64
 
 
+def _echo_key(text: str) -> str:
+    """Normalize text for echo matching.
+
+    The actuator delivers the raw Matrix body, but CC strips surrounding
+    whitespace before recording the prompt in its transcript. Element X also
+    appends a trailing space to message bodies. Comparing the raw strings
+    therefore never matches, so every delivered reply gets mirrored back as an
+    echo. Stripping both sides makes the comparison survive that delta.
+    """
+    return text.strip()
+
+
 class _MatrixIOProto(Protocol):
     def room_for_agent(self, agent: str) -> str: ...
     async def post_top_level(self, text: str, room_id: str | None = None) -> str: ...
@@ -88,8 +100,9 @@ class Worker:
 
     async def _on_prompt(self, ev: dict[str, Any]) -> None:
         text = ev.get("text", "")
-        if text in self._pending_echo:
-            self._pending_echo.remove(text)
+        key = _echo_key(text)
+        if key in self._pending_echo:
+            self._pending_echo.remove(key)
             log.debug("worker[%s] echo suppressed: %r", self._sid, text)
             return
         await self._mark_pending_notification_resolved()
@@ -195,6 +208,6 @@ class Worker:
             self._posted_uuids = self._posted_uuids[-_MAX_REMEMBERED_UUIDS:]
 
     def _remember_echo(self, text: str) -> None:
-        self._pending_echo.append(text)
+        self._pending_echo.append(_echo_key(text))
         if len(self._pending_echo) > _MAX_PENDING_ECHO:
             self._pending_echo = self._pending_echo[-_MAX_PENDING_ECHO:]
