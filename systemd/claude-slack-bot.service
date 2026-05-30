@@ -1,5 +1,5 @@
 [Unit]
-Description=Bridge Claude Code sessions into Slack
+Description=Bridge Claude Code sessions into Matrix
 After=network-online.target
 Wants=network-online.target
 
