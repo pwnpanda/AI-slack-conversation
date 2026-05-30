@@ -29,7 +29,7 @@ def test_codex_rename_prompt_blocks_model_submission(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert result.stdout == "{}\n"
-    assert "Renamed Slack thread to named-session" in result.stderr
+    assert "Renamed Matrix thread to named-session" in result.stderr
 
 
 def test_claude_rename_prompt_does_not_block(tmp_path: Path) -> None:

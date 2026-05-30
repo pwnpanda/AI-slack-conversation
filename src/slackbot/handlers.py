@@ -186,7 +186,26 @@ class EventHandlers:
     def _refresh_runtime(self, sid: str, ev: dict[str, Any]) -> None:
         sess = self._reg.get_session(sid)
         if sess is None:
-            return
+            # First hook arrival for a CC that pre-dates the current registry
+            # (typical after the Slack→Matrix migration that dropped the DB,
+            # or any other registry reset). Stub a row so subsequent events
+            # can mirror; cwd is unknown until the next session_start fires.
+            agent = _agent(ev.get("agent"))
+            room_id = self._matrix.room_for_agent(agent)
+            self._reg.upsert_session(
+                sid,
+                ev.get("cwd") or "(unknown)",
+                ev.get("zellij_session"),
+                ev.get("zellij_pane_id"),
+                agent=agent,
+                matrix_room_id=room_id,
+                cc_pid=_int_or_none(ev.get("cc_pid")),
+                transcript_path=ev.get("transcript_path"),
+            )
+            sess = self._reg.get_session(sid)
+            log.info("auto-created session row for unknown sid %s (agent=%s)", sid, agent)
+            if sess is None:
+                return
         cc_pid = _int_or_none(ev.get("cc_pid"))
         self._reg.refresh_liveness(
             sid,
