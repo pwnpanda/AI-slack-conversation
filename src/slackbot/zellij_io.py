@@ -46,9 +46,10 @@ class ZellijActuator:
             raise ZellijError("spawn_pane_with_command requires a non-empty command")
         async with self._lock:
             await self._zellij(session, "action", "new-pane", "--", *command_argv)
-            await asyncio.sleep(delay_seconds)
-            await self._zellij(session, "action", "write-chars", initial_text)
-            await self._zellij(session, "action", "write", "13")
+            if initial_text:
+                await asyncio.sleep(delay_seconds)
+                await self._zellij(session, "action", "write-chars", initial_text)
+                await self._zellij(session, "action", "write", "13")
 
     async def _zellij(self, session: str, *args: str, allow_already: bool = False) -> None:
         cmd = ["zellij", "--session", session, *args]

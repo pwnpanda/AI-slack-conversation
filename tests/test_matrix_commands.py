@@ -128,3 +128,48 @@ async def test_name_uniqueness_is_per_room(tmp_db_path: str) -> None:
     # Same name in a different room should be allowed.
     assert await cmd.maybe_handle(room_id="!b:server", text="/new kbd", msg_ts="m") is True
     reg.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_spawns_pane_with_resume_flag(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    matrix = _FakeMatrix()
+    actuator = _FakeActuator()
+    cmd = _handler(reg, matrix, actuator)
+    handled = await cmd.maybe_handle(room_id="!claude:s", text="/resume Finance", msg_ts="$M1")
+    assert handled is True
+    assert len(actuator.spawns) == 1
+    spawn = actuator.spawns[0]
+    assert spawn["command_argv"][-2:] == ("--resume", "Finance")
+    # initial_text empty: CC starts directly, no typing needed.
+    assert spawn["initial_text"] == ""
+    # Both hourglass and checkmark on the user's command message.
+    emojis = [r[1] for r in matrix.reactions if r[0] == "$M1"]
+    assert "hourglass_flowing_sand" in emojis
+    assert "white_check_mark" in emojis
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_spawn_failure_is_reported(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    matrix = _FakeMatrix()
+    actuator = _FakeActuator(raise_on_spawn=RuntimeError("zellij ai not running"))
+    cmd = _handler(reg, matrix, actuator)
+    await cmd.maybe_handle(room_id="!claude:s", text="/resume Finance", msg_ts="$M2")
+    assert any("Failed to spawn resume pane" in t[1] for t in matrix.in_thread)
+    emojis = [r[1] for r in matrix.reactions if r[0] == "$M2"]
+    assert "white_check_mark" not in emojis
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_pattern_rejects_extra_args(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    cmd = _handler(reg, _FakeMatrix(), _FakeActuator())
+    assert await cmd.maybe_handle(room_id="!c:s", text="/resume", msg_ts="m") is False
+    assert await cmd.maybe_handle(room_id="!c:s", text="/resumex Finance", msg_ts="m") is False
+    reg.close()
