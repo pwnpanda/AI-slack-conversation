@@ -4,8 +4,11 @@ PORT="${SLACKBOT_PORT:-8787}"
 agent="${SLACKBOT_AGENT:-claude}"
 input="$(cat || true)"
 sid="$(printf '%s' "$input" | jq -r '.session_id // env.GEMINI_SESSION_ID // empty' 2>/dev/null || true)"
-printf "DEBUG: agent=%s sid=%s\n" "$agent" "$sid" >> /tmp/slackbot-hooks.log
 prompt="$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null || true)"
+# CC includes cwd in the UserPromptSubmit JSON; fall back to $PWD so the
+# bot can backfill the registry when the row was auto-created without it.
+cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
+[ -n "$cwd" ] || cwd="$PWD"
 if [ -z "$sid" ]; then
   printf '{}\n'
   exit 0
@@ -25,10 +28,10 @@ name="$(printf '%s' "$prompt" \
 if [ -n "$name" ]; then
   cc_pid="$PPID"
   name_payload="$(jq -n \
-    --arg sid "$sid" --arg agent "$agent" --arg n "$name" \
+    --arg sid "$sid" --arg agent "$agent" --arg n "$name" --arg cwd "$cwd" \
     --arg zs "${ZELLIJ_SESSION_NAME:-}" --arg zp "${ZELLIJ_PANE_ID:-}" \
     --argjson cc_pid "$cc_pid" \
-    '{v:1,kind:"name",session_id:$sid,agent:$agent,name:$n,
+    '{v:1,kind:"name",session_id:$sid,agent:$agent,name:$n,cwd:$cwd,
       zellij_session:$zs,zellij_pane_id:$zp,cc_pid:$cc_pid}')"
   if [ "$agent" = "codex" ] || [ "$agent" = "gemini" ]; then
     if post "$name_payload"; then
@@ -44,10 +47,10 @@ fi
 
 cc_pid="$PPID"
 prompt_payload="$(jq -n \
-  --arg sid "$sid" --arg agent "$agent" --arg t "$prompt" \
+  --arg sid "$sid" --arg agent "$agent" --arg t "$prompt" --arg cwd "$cwd" \
   --arg zs "${ZELLIJ_SESSION_NAME:-}" --arg zp "${ZELLIJ_PANE_ID:-}" \
   --argjson cc_pid "$cc_pid" \
-  '{v:1,kind:"prompt",session_id:$sid,agent:$agent,text:$t,
+  '{v:1,kind:"prompt",session_id:$sid,agent:$agent,text:$t,cwd:$cwd,
     zellij_session:$zs,zellij_pane_id:$zp,cc_pid:$cc_pid}')"
 post "$prompt_payload" || true
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -70,7 +71,11 @@ class EventHandlers:
             return
 
         recovered = self._reg.find_recoverable_session(
-            zellij_session=zellij_session, cwd=cwd, agent=agent, exclude_sid=sid
+            zellij_session=zellij_session,
+            zellij_pane_id=ev.get("zellij_pane_id"),
+            cwd=cwd,
+            agent=agent,
+            exclude_sid=sid,
         )
         if (
             recovered
@@ -213,6 +218,20 @@ class EventHandlers:
             ev.get("zellij_pane_id") or sess.zellij_pane_id,
             cc_pid,
         )
+        # Back-fill cwd when a later hook supplies a real value. Top-level
+        # message may already exist with the placeholder; if so, edit it
+        # in place rather than leaving "(unknown)" forever.
+        new_cwd = ev.get("cwd")
+        if new_cwd and sess.cwd in ("(unknown)", "") and new_cwd != sess.cwd:
+            self._reg.upsert_session(
+                sid, new_cwd, sess.zellij_session, sess.zellij_pane_id,
+                agent=sess.agent, matrix_room_id=sess.matrix_room_id,
+                cc_pid=cc_pid, transcript_path=sess.transcript_path,
+            )
+            if sess.name and sess.matrix_thread_root:
+                refreshed = self._reg.get_session(sid)
+                if refreshed:
+                    asyncio.create_task(self._edit_top_level_with_new_cwd(refreshed))
         # Self-heal: an event arriving for a session previously marked ended
         # means CC came back (auto-resume, manual restart). Flip status back
         # and re-attach the transcript reader if needed. Without this, a
@@ -222,6 +241,16 @@ class EventHandlers:
             self._reg.set_status(sid, "active")
         if sess.transcript_path:
             self._sup.attach_reader(sid, sess.transcript_path)
+
+    async def _edit_top_level_with_new_cwd(self, sess) -> None:
+        try:
+            await self._matrix.edit_top_level(
+                sess.matrix_thread_root,
+                top_level_text(sess.name, sess.cwd, sess.status, sess.agent),
+                room_id=sess.matrix_room_id,
+            )
+        except Exception:
+            log.exception("failed to re-edit top-level after cwd backfill")
 
 
 def _iso_now() -> str:

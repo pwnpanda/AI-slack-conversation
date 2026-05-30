@@ -291,12 +291,23 @@ class Registry:
     def find_recoverable_session(
         self,
         zellij_session: str | None,
+        zellij_pane_id: str | None,
         cwd: str,
         agent: str,
         exclude_sid: str,
     ) -> Session | None:
-        """Find any named predecessor in the same workspace. The caller decides
-        whether the candidate is actually dead via session_is_alive."""
+        """Find any named predecessor in the EXACT SAME zellij pane.
+
+        Matching on cwd + zellij_session alone is too loose: a single
+        project dir typically holds several CCs across panes, and the
+        first-named one would silently steal every other restart's
+        identity. Pane id is the only field that's truly per-CC.
+
+        The caller decides whether the candidate is actually dead via
+        session_is_alive.
+        """
+        if not zellij_pane_id:
+            return None
         row = (
             self._c()
             .execute(
@@ -305,12 +316,13 @@ class Registry:
                 WHERE name IS NOT NULL
                   AND cwd = ?
                   AND zellij_session IS ?
+                  AND zellij_pane_id = ?
                   AND agent = ?
                   AND cc_session_id != ?
                 ORDER BY last_event_at DESC
                 LIMIT 1
                 """,
-                (cwd, zellij_session, agent, exclude_sid),
+                (cwd, zellij_session, zellij_pane_id, agent, exclude_sid),
             )
             .fetchone()
         )
