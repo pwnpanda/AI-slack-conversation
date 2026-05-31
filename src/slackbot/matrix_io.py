@@ -10,7 +10,33 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import markdown
+
 log = logging.getLogger(__name__)
+
+
+def _render_html(body: str) -> str:
+    """CommonMark-ish render of *body* for Matrix's formatted_body field.
+
+    `fenced_code` keeps triple-backtick blocks intact (CC output is often
+    multi-line code/JSON we wrap in ``` already). `nl2br` converts single
+    newlines into <br> so we don't have to double-newline every line in
+    the bot's source text.
+    """
+    return markdown.markdown(body, extensions=["fenced_code", "nl2br"])
+
+
+def _text_content(body: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build an m.text content dict with both plain body + rendered HTML."""
+    content: dict[str, Any] = {
+        "msgtype": "m.text",
+        "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": _render_html(body),
+    }
+    if extra:
+        content.update(extra)
+    return content
 
 
 # Slack emoji-name -> Matrix Unicode glyph. Element X renders these natively.
@@ -57,7 +83,7 @@ class MatrixIO:
         resp = await self._client.room_send(
             room_id=target,
             message_type="m.room.message",
-            content={"msgtype": "m.text", "body": text},
+            content=_text_content(text),
         )
         return str(resp.event_id)
 
@@ -69,16 +95,17 @@ class MatrixIO:
         understand threads still render the message as a reply.
         """
         target = self._room_or_default(room_id)
-        content = {
-            "msgtype": "m.text",
-            "body": text,
-            "m.relates_to": {
-                "rel_type": "m.thread",
-                "event_id": thread_root,
-                "is_falling_back": True,
-                "m.in_reply_to": {"event_id": thread_root},
+        content = _text_content(
+            text,
+            extra={
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": thread_root,
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": thread_root},
+                }
             },
-        }
+        )
         resp = await self._client.room_send(
             room_id=target,
             message_type="m.room.message",
@@ -91,13 +118,22 @@ class MatrixIO:
 
         Per the Matrix spec, the visible body for legacy clients is
         prefixed with "* ", while m.new_content carries the replacement
-        body for spec-aware clients.
+        body for spec-aware clients. Both the visible and replacement
+        bodies carry their own formatted HTML alongside the plain text.
         """
         target = self._room_or_default(room_id)
+        rendered = _render_html(text)
         content = {
             "msgtype": "m.text",
             "body": f"* {text}",
-            "m.new_content": {"msgtype": "m.text", "body": text},
+            "format": "org.matrix.custom.html",
+            "formatted_body": f"* {rendered}",
+            "m.new_content": {
+                "msgtype": "m.text",
+                "body": text,
+                "format": "org.matrix.custom.html",
+                "formatted_body": rendered,
+            },
             "m.relates_to": {"rel_type": "m.replace", "event_id": ts},
         }
         await self._client.room_send(

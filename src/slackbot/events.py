@@ -63,9 +63,9 @@ def format_event(kind: str, data: dict[str, Any]) -> str:
             parts = [f"{prefix}❓ {question['question']}"]
             for i, opt in enumerate(question["options"], start=1):
                 if opt.get("description"):
-                    parts.append(f"  *{i}.* {opt['label']} — _{opt['description']}_")
+                    parts.append(f"- **{i}.** {opt['label']} — _{opt['description']}_")
                 else:
-                    parts.append(f"  *{i}.* {opt['label']}")
+                    parts.append(f"- **{i}.** {opt['label']}")
             parts.append(
                 "_Reply with the option number (e.g. `2`), "
                 "or type free-form text to write a custom answer._"
