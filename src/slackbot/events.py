@@ -37,18 +37,26 @@ def top_level_text(name: str, cwd: str, status: str, agent: str | None = None) -
     return f"⚪ {prefix}{name}  ·  {cwd}  (ended)"
 
 
-def _codeblock_if_multiline(text: str) -> str:
+def _attach_body(text: str) -> str:
+    """Return *text* attached to a prefix line, preserving markdown structure.
+
+    Single-line text follows the prefix inline. Multi-line text is separated
+    by a blank line so Element's markdown renderer treats the content as its
+    own block — headings, bullet lists, fenced code, etc. in CC's reply
+    render as themselves rather than getting flattened into one monospaced
+    code block.
+    """
     if "\n" in text:
-        return f"\n```\n{text}\n```"
+        return f"\n\n{text}"
     return f" {text}"
 
 
 def format_event(kind: str, data: dict[str, Any]) -> str:
     prefix = f"[{agent_label(str(data.get('agent', 'claude')))}] "
     if kind == "prompt":
-        return f"{prefix}👤{_codeblock_if_multiline(str(data.get('text', '')))}"
+        return f"{prefix}👤{_attach_body(str(data.get('text', '')))}"
     if kind == "response":
-        body = f"{prefix}🤖{_codeblock_if_multiline(str(data.get('text', '')))}"
+        body = f"{prefix}🤖{_attach_body(str(data.get('text', '')))}"
         summary = data.get("tool_summary")
         if summary:
             body += f"\n_↳ {summary}_"

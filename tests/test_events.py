@@ -17,10 +17,14 @@ def test_format_prompt_single_line() -> None:
     assert format_event("prompt", {"text": "hello", "agent": "claude"}) == "[Claude] 👤 hello"
 
 
-def test_format_prompt_multi_line_codeblock() -> None:
+def test_format_prompt_multi_line_renders_markdown() -> None:
+    """Multi-line prompt/response text is appended after a blank line so
+    Element renders its markdown structure (headings, lists, fenced code
+    blocks already in CC's output) natively — no outer code-block wrap,
+    which would render the whole reply as a monospaced raw-text listing."""
     out = format_event("prompt", {"text": "line1\nline2", "agent": "codex"})
-    assert out.startswith("[Codex] 👤\n```\n")
-    assert "line1\nline2" in out
+    assert out == "[Codex] 👤\n\nline1\nline2"
+    assert "```" not in out
 
 
 def test_format_response_with_tool_summary() -> None:
