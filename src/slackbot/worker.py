@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Any, Protocol
 
-from slackbot.events import chunk_for_matrix, format_event
+from slackbot.events import chunk_for_matrix, format_event, parse_ask_user_question
 from slackbot.registry import Registry
 
 log = logging.getLogger(__name__)
@@ -18,6 +18,23 @@ log = logging.getLogger(__name__)
 _MAX_REMEMBERED_UUIDS = 1000
 # Cap on pending echo entries.
 _MAX_PENDING_ECHO = 64
+
+
+def _option_index_for_reply(text: str, pending: dict | None) -> int | None:
+    """Return zero-based option index if *text* is a bare option number and a
+    question is pending with that option. None means "deliver as text"."""
+    if pending is None:
+        return None
+    options = pending.get("options") if isinstance(pending, dict) else None
+    if not isinstance(options, list) or not options:
+        return None
+    stripped = text.strip()
+    if not stripped.isdigit():
+        return None
+    idx = int(stripped) - 1
+    if 0 <= idx < len(options):
+        return idx
+    return None
 
 
 def _echo_key(text: str) -> str:
@@ -44,6 +61,7 @@ class _MatrixIOProto(Protocol):
 
 class _ActuatorProto(Protocol):
     async def deliver(self, session: str, pane_id: str, text: str) -> None: ...
+    async def deliver_keys(self, session: str, pane_id: str, keys: list[str]) -> None: ...
 
 
 class Worker:
@@ -113,6 +131,9 @@ class Worker:
         if uuid in self._posted_uuids:
             return
         await self._mark_pending_notification_resolved()
+        # A fresh assistant response means CC consumed the prior question's
+        # answer; any stale pending_question state is no longer relevant.
+        self._reg.clear_pending_question(self._sid)
         data: dict[str, Any] = {"text": ev.get("text", "")}
         tool_summary = ev.get("tool_summary")
         if tool_summary:
@@ -148,6 +169,14 @@ class Worker:
         self._reg.set_pending_notification(
             self._sid, first_event_id, chunks[0], sess.matrix_room_id
         )
+        # If this notification is an AskUserQuestion, remember the option list
+        # so a numeric reply navigates by arrow keys rather than landing in
+        # the "Other" text field. Any other notification clears the state.
+        question = parse_ask_user_question(str(ev.get("tool_request", "")))
+        if question is not None:
+            self._reg.set_pending_question(self._sid, question["options"])
+        else:
+            self._reg.clear_pending_question(self._sid)
 
     async def _on_error(self, ev: dict[str, Any]) -> None:
         await self._mark_pending_notification_resolved()
@@ -167,8 +196,23 @@ class Worker:
                 room_id=room_id,
             )
             return
+        # If CC is mid-AskUserQuestion and the reply is a bare option number,
+        # navigate the TUI with arrow keys instead of typing the digit (which
+        # would land in the "Other" free-text field on CC's question UI).
+        pending = self._reg.get_pending_question(self._sid)
+        option_index = _option_index_for_reply(text, pending)
         try:
-            await self._actuator.deliver(sess.zellij_session, sess.zellij_pane_id, text)
+            if option_index is not None:
+                keys = ["Down"] * option_index + ["Enter"]
+                await self._actuator.deliver_keys(sess.zellij_session, sess.zellij_pane_id, keys)
+                self._reg.clear_pending_question(self._sid)
+            else:
+                await self._actuator.deliver(sess.zellij_session, sess.zellij_pane_id, text)
+                # Free-form text answer goes into the "Other" field if a
+                # question was pending; clear state so the next reply isn't
+                # mis-routed if CC actually moved past the question.
+                if pending is not None:
+                    self._reg.clear_pending_question(self._sid)
         except Exception as exc:
             await self._matrix.post_in_thread(
                 sess.matrix_thread_root or "",
@@ -177,7 +221,8 @@ class Worker:
             )
             await self._matrix.react(msg_ts, "warning", room_id=room_id)
             return
-        self._remember_echo(text)
+        if option_index is None:
+            self._remember_echo(text)
         await self._mark_pending_notification_resolved()
         await self._matrix.react(msg_ts, "white_check_mark", room_id=room_id)
 
