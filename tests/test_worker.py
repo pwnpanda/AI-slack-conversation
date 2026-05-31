@@ -36,9 +36,13 @@ class FakeMatrixIO:
 @dataclass
 class FakeActuator:
     deliveries: list[tuple[str, str, str]] = field(default_factory=list)
+    key_deliveries: list[tuple[str, str, list[str]]] = field(default_factory=list)
 
     async def deliver(self, session, pane_id, text):
         self.deliveries.append((session, pane_id, text))
+
+    async def deliver_keys(self, session, pane_id, keys):
+        self.key_deliveries.append((session, pane_id, list(keys)))
 
 
 def _bound_session(reg, sid, agent="claude"):
@@ -313,4 +317,138 @@ async def test_no_pending_notification_is_a_noop(tmp_db_path: str) -> None:
     await worker.stop()
 
     assert matrix.edits == []
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_numeric_reply_during_ask_user_question_uses_arrow_keys(
+    tmp_db_path: str,
+) -> None:
+    """When a question is pending, replying '2' navigates the TUI with
+    Down+Enter rather than typing the digit (which would land in 'Other')."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    reg.set_pending_question(
+        "s1",
+        [
+            {"label": "Per-key RGB", "description": ""},
+            {"label": "Underglow", "description": ""},
+            {"label": "None", "description": ""},
+        ],
+    )
+    matrix = FakeMatrixIO()
+    actuator = FakeActuator()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=actuator)
+    await worker.start()
+    await worker.enqueue({"kind": "matrix_reply", "text": "2", "msg_ts": "$M1"})
+    await worker.stop()
+
+    assert actuator.deliveries == []
+    assert actuator.key_deliveries == [("main", "13", ["Down", "Enter"])]
+    assert reg.get_pending_question("s1") is None  # consumed on success
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_freeform_reply_during_ask_user_question_types_text_and_clears(
+    tmp_db_path: str,
+) -> None:
+    """A non-numeric reply during a pending question goes verbatim into
+    CC's 'Other' field, then clears the pending state."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    reg.set_pending_question("s1", [{"label": "A"}, {"label": "B"}])
+    matrix = FakeMatrixIO()
+    actuator = FakeActuator()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=actuator)
+    await worker.start()
+    await worker.enqueue(
+        {"kind": "matrix_reply", "text": "I want a fourth option", "msg_ts": "$M2"}
+    )
+    await worker.stop()
+
+    assert actuator.key_deliveries == []
+    assert actuator.deliveries == [("main", "13", "I want a fourth option")]
+    assert reg.get_pending_question("s1") is None
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_numeric_reply_without_pending_question_types_normally(
+    tmp_db_path: str,
+) -> None:
+    """When no question is pending, '1' should NOT navigate — it should
+    just be typed (so it works for permission prompts as before)."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIO()
+    actuator = FakeActuator()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=actuator)
+    await worker.start()
+    await worker.enqueue({"kind": "matrix_reply", "text": "1", "msg_ts": "$M3"})
+    await worker.stop()
+
+    assert actuator.key_deliveries == []
+    assert actuator.deliveries == [("main", "13", "1")]
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_notification_stores_pending_question(
+    tmp_db_path: str,
+) -> None:
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    await worker.enqueue(
+        {
+            "kind": "notification",
+            "message": "Claude needs your permission",
+            "tool_request": (
+                'AskUserQuestion({"questions":[{"question":"Pick","options":'
+                '[{"label":"A"},{"label":"B"}]}]})'
+            ),
+        }
+    )
+    await worker.stop()
+
+    pending = reg.get_pending_question("s1")
+    assert pending is not None
+    assert [o["label"] for o in pending["options"]] == ["A", "B"]
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_response_event_clears_pending_question(tmp_db_path: str) -> None:
+    """A new assistant response means CC moved past the question; stale
+    pending_question state should be wiped so a later numeric reply isn't
+    misinterpreted."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    reg.set_pending_question("s1", [{"label": "A"}, {"label": "B"}])
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    await worker.enqueue(
+        {"kind": "response", "uuid": "u1", "parentUuid": None, "text": "answer recorded"}
+    )
+    await worker.stop()
+    assert reg.get_pending_question("s1") is None
     reg.close()

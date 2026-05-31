@@ -1,7 +1,8 @@
-"""Pure functions that turn structured events into Slack message text."""
+"""Pure functions that turn structured events into Matrix message text."""
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -54,8 +55,26 @@ def format_event(kind: str, data: dict[str, Any]) -> str:
         return body
     if kind == "notification":
         msg = str(data.get("message", "")) or "waiting for input"
-        parts = [f"{prefix}⏸ {msg}"]
         tool_request = str(data.get("tool_request", "")).strip()
+        ctx = str(data.get("context", "")).strip()
+
+        question = parse_ask_user_question(tool_request)
+        if question is not None:
+            parts = [f"{prefix}❓ {question['question']}"]
+            for i, opt in enumerate(question["options"], start=1):
+                if opt.get("description"):
+                    parts.append(f"  *{i}.* {opt['label']} — _{opt['description']}_")
+                else:
+                    parts.append(f"  *{i}.* {opt['label']}")
+            parts.append(
+                "_Reply with the option number (e.g. `2`), "
+                "or type free-form text to write a custom answer._"
+            )
+            if ctx:
+                parts.append(f"```\n{ctx}\n```")
+            return "\n".join(parts)
+
+        parts = [f"{prefix}⏸ {msg}"]
         if tool_request:
             tr = (
                 tool_request
@@ -64,13 +83,52 @@ def format_event(kind: str, data: dict[str, Any]) -> str:
             )
             parts.append(f"_Asking permission for:_ `{tr}`")
             parts.append("_Reply `1` to approve, `2` to deny, `3` to allow for session._")
-        ctx = str(data.get("context", "")).strip()
         if ctx:
             parts.append(f"```\n{ctx}\n```")
         return "\n".join(parts)
     if kind == "error":
         return f"{prefix}❌ {data.get('text', '')}"
     return f"{prefix}[{kind}] {data!r}"
+
+
+_ASK_USER_QUESTION_RE = re.compile(r"^AskUserQuestion\((\{.*\})\)\s*$", re.DOTALL)
+
+
+def parse_ask_user_question(tool_request: str) -> dict[str, Any] | None:
+    """If *tool_request* is CC's AskUserQuestion tool call, return the first
+    pending question as ``{"question": str, "options": [{"label", "description"}]}``.
+
+    Returns None for any other tool, malformed JSON, or empty questions list.
+    AskUserQuestion can hold multiple questions; we surface the first one and
+    rely on CC re-firing the notification hook for subsequent questions.
+    """
+    m = _ASK_USER_QUESTION_RE.match(tool_request.strip())
+    if not m:
+        return None
+    try:
+        payload = json.loads(m.group(1))
+    except (ValueError, TypeError):
+        return None
+    questions = payload.get("questions") if isinstance(payload, dict) else None
+    if not isinstance(questions, list) or not questions:
+        return None
+    first = questions[0]
+    if not isinstance(first, dict):
+        return None
+    options_raw = first.get("options")
+    if not isinstance(options_raw, list):
+        return None
+    options: list[dict[str, str]] = []
+    for o in options_raw:
+        if not isinstance(o, dict):
+            continue
+        label = str(o.get("label") or "").strip()
+        if not label:
+            continue
+        options.append({"label": label, "description": str(o.get("description") or "").strip()})
+    if not options:
+        return None
+    return {"question": str(first.get("question") or "").strip(), "options": options}
 
 
 def chunk_for_matrix(text: str, limit: int = _CHUNK_AT) -> list[str]:

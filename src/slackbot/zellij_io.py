@@ -28,6 +28,19 @@ class ZellijActuator:
             await self._zellij(session, "action", "write-chars", text)
             await self._zellij(session, "action", "write", "13")
 
+    async def deliver_keys(self, session: str, pane_id: str, keys: list[str]) -> None:
+        """Focus the pane and send a sequence of named keys (Down, Enter, …).
+
+        Used for navigating TUI option lists (e.g. CC's AskUserQuestion)
+        where typing the literal option number would land in the "Other"
+        free-text field instead of selecting the option.
+        """
+        if not keys:
+            return
+        async with self._lock:
+            await self._zellij(session, "action", "focus-pane-id", pane_id, allow_already=True)
+            await self._zellij(session, "action", "send-keys", *keys)
+
     async def spawn_pane_with_command(
         self,
         session: str,

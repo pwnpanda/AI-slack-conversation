@@ -171,3 +171,54 @@ def test_chunk_for_matrix_hard_slices_when_line_too_long() -> None:
     assert len(chunks) >= 2
     # First chunk fits under the limit; total y count preserved.
     assert sum(c.count("y") for c in chunks) == 100_000
+
+
+def test_parse_ask_user_question_extracts_first_question_and_options() -> None:
+    from slackbot.events import parse_ask_user_question
+
+    payload = (
+        'AskUserQuestion({"questions":[{"question":"Which RGB?","header":"RGB",'
+        '"multiSelect":false,"options":['
+        '{"label":"Per-key","description":"SK6812"},'
+        '{"label":"Underglow","description":""},'
+        '{"label":"None"}'
+        "]}]})"
+    )
+    q = parse_ask_user_question(payload)
+    assert q is not None
+    assert q["question"] == "Which RGB?"
+    assert [o["label"] for o in q["options"]] == ["Per-key", "Underglow", "None"]
+    assert q["options"][0]["description"] == "SK6812"
+    assert q["options"][2]["description"] == ""
+
+
+def test_parse_ask_user_question_returns_none_for_other_tools() -> None:
+    from slackbot.events import parse_ask_user_question
+
+    assert parse_ask_user_question('Bash({"command":"ls"})') is None
+    assert parse_ask_user_question("") is None
+    assert parse_ask_user_question("AskUserQuestion(not json)") is None
+    assert parse_ask_user_question('AskUserQuestion({"questions":[]})') is None
+    assert parse_ask_user_question('AskUserQuestion({"questions":[{}]})') is None
+
+
+def test_notification_format_uses_question_display_when_ask_user_question() -> None:
+    out = format_event(
+        "notification",
+        {
+            "message": "Claude needs your permission",
+            "tool_request": (
+                'AskUserQuestion({"questions":[{"question":"Pick one",'
+                '"options":[{"label":"Foo","description":""},'
+                '{"label":"Bar","description":"second"}]}]})'
+            ),
+            "agent": "claude",
+        },
+    )
+    # No 'approve/deny' template — wrong UI for AskUserQuestion.
+    assert "Reply `1` to approve" not in out
+    # Question and options shown.
+    assert "❓ Pick one" in out
+    assert "Foo" in out
+    assert "Bar" in out
+    assert "second" in out
