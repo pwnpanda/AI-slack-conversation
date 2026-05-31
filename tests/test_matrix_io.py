@@ -148,3 +148,22 @@ async def test_fenced_code_block_renders_as_pre_code() -> None:
     html = fake.sent[0]["content"]["formatted_body"]
     assert "<pre>" in html
     assert "hello" in html and "world" in html
+
+
+@pytest.mark.asyncio
+async def test_markdown_tables_render_to_html_table() -> None:
+    fake = FakeMatrixClient()
+    io = MatrixIO(fake, room_id="!default:server")
+    body = (
+        "Here's a comparison:\n\n"
+        "| col1 | col2 |\n"
+        "|------|------|\n"
+        "| a    | b    |\n"
+        "| c    | d    |\n"
+    )
+    await io.post_top_level(body)
+    html = fake.sent[0]["content"]["formatted_body"]
+    assert "<table>" in html
+    assert "<thead>" in html
+    assert "<tbody>" in html
+    assert "<td>a</td>" in html and "<td>d</td>" in html

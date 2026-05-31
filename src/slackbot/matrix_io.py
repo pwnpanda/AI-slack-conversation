@@ -21,9 +21,13 @@ def _render_html(body: str) -> str:
     `fenced_code` keeps triple-backtick blocks intact (CC output is often
     multi-line code/JSON we wrap in ``` already). `nl2br` converts single
     newlines into <br> so we don't have to double-newline every line in
-    the bot's source text.
+    the bot's source text. `tables` parses GitHub-style pipe tables that
+    CC frequently produces in responses. `sane_lists` recognises lists
+    that begin immediately after a paragraph without a blank line.
     """
-    return markdown.markdown(body, extensions=["fenced_code", "nl2br"])
+    return markdown.markdown(
+        body, extensions=["fenced_code", "nl2br", "tables", "sane_lists"]
+    )
 
 
 def _text_content(body: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
