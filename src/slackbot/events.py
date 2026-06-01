@@ -46,7 +46,7 @@ def top_level_text(
     """
     prefix = f"[{agent_label(agent)}] "
     if status == "active":
-        suffix = "  🆕" if recent else ""
+        suffix = "  🔥🆕" if recent else ""
         return f"🟢 {prefix}{name}  ·  {cwd}{suffix}"
     return f"⚪ {prefix}{name}  ·  {cwd}  (ended)"
 
