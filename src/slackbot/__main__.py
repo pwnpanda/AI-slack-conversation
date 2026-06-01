@@ -75,7 +75,39 @@ async def amain() -> None:
     client.user_id = cfg.matrix_user_id
     client.device_id = cfg.matrix_device_id
 
-    matrix_io = MatrixIO(client, cfg.matrix_default_room, cfg.agent_rooms)
+    # Optional second client logged in as the human, used for posting CC-typed
+    # prompts under the user's identity. When configured, the bot will keep
+    # two access tokens active and route 👤 mirrors via this client.
+    user_client = None
+    if cfg.matrix_user_user_id and cfg.matrix_user_access_token:
+        user_client = AsyncClient(cfg.matrix_homeserver, cfg.matrix_user_user_id)
+        user_client.access_token = cfg.matrix_user_access_token
+        user_client.user_id = cfg.matrix_user_user_id
+        log.info("user-account mirroring enabled (puppet user=%s)", cfg.matrix_user_user_id)
+
+    # Dedupe by Matrix event_id so a message delivered via the on_room_message
+    # callback (and potentially also via initial sync replay) only gets
+    # actuated once. Also used as a self-loop guard for the user-account
+    # puppet: when the bot posts as the human via the second client, the
+    # @ai-bot sync still sees that event in the room timeline; without
+    # this set, it'd route the bot's own post to the actuator and the
+    # text would loop forever into the pane.
+    delivered_event_ids: set[str] = set()
+    _DEDUPE_CAP = 4096
+
+    def _remember_self_post(event_id: str) -> None:
+        delivered_event_ids.add(event_id)
+        if len(delivered_event_ids) > _DEDUPE_CAP:
+            for x in list(delivered_event_ids)[: _DEDUPE_CAP // 2]:
+                delivered_event_ids.discard(x)
+
+    matrix_io = MatrixIO(
+        client,
+        cfg.matrix_default_room,
+        cfg.agent_rooms,
+        user_client=user_client,
+        on_self_post=_remember_self_post,
+    )
     actuator = ZellijActuator()
     supervisor = Supervisor(reg=reg, matrix=matrix_io, actuator=actuator)
     handlers = EventHandlers(reg, supervisor, matrix_io)
@@ -91,20 +123,10 @@ async def amain() -> None:
 
     loop = asyncio.get_running_loop()
 
-    # Dedupe by Matrix event_id so a message delivered via the on_room_message
-    # callback (and potentially also via initial sync replay) only gets
-    # actuated once.
-    delivered_event_ids: set[str] = set()
-    _DEDUPE_CAP = 4096
-
     async def handle_thread_reply(room_id: str, thread_root: str, text: str, event_id: str) -> None:
         if event_id in delivered_event_ids:
             return
-        delivered_event_ids.add(event_id)
-        # Bounded LRU-ish: drop arbitrary half when cap exceeded.
-        if len(delivered_event_ids) > _DEDUPE_CAP:
-            for x in list(delivered_event_ids)[: _DEDUPE_CAP // 2]:
-                delivered_event_ids.discard(x)
+        _remember_self_post(event_id)
         log.info(
             "thread reply received: room=%s thread_root=%s event_id=%s len=%d",
             room_id,
@@ -117,7 +139,9 @@ async def amain() -> None:
     async def on_room_message(room, event) -> None:
         sd_notify.watchdog()
         if event.sender == client.user_id:
-            return  # ignore our own messages
+            return  # @ai-bot's own post echoed back by sync
+        if event.event_id in delivered_event_ids:
+            return  # something we posted (e.g. as the user puppet) coming back via sync
         content = event.source.get("content", {}) if hasattr(event, "source") else {}
         relates = content.get("m.relates_to") or {}
         text = getattr(event, "body", "") or content.get("body", "")
@@ -181,6 +205,8 @@ async def amain() -> None:
             t.cancel()
         await supervisor.shutdown()
         await client.close()
+        if user_client is not None:
+            await user_client.close()
         await http_runner.cleanup()
         reg.close()
 

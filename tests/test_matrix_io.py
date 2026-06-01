@@ -167,3 +167,55 @@ async def test_markdown_tables_render_to_html_table() -> None:
     assert "<thead>" in html
     assert "<tbody>" in html
     assert "<td>a</td>" in html and "<td>d</td>" in html
+
+
+@pytest.mark.asyncio
+async def test_as_user_routes_through_user_client_and_records_self_post() -> None:
+    bot_client = FakeMatrixClient(next_event_id="$bot:server")
+    user_client = FakeMatrixClient(next_event_id="$user:server")
+    self_posts: list[str] = []
+    io = MatrixIO(
+        bot_client,
+        room_id="!default:server",
+        user_client=user_client,
+        on_self_post=self_posts.append,
+    )
+    assert io.has_user_client() is True
+    eid = await io.post_in_thread("$root:server", "hi from me", as_user=True)
+    assert eid == "$user:server"
+    # Bot client untouched, user client received the post.
+    assert bot_client.sent == []
+    assert len(user_client.sent) == 1
+    # The self-post hook fired so the daemon's dedupe set can ignore the
+    # event when it comes back via the bot's sync.
+    assert self_posts == ["$user:server"]
+
+
+@pytest.mark.asyncio
+async def test_as_user_false_keeps_bot_path_and_does_not_record_self_post() -> None:
+    bot_client = FakeMatrixClient(next_event_id="$bot:server")
+    user_client = FakeMatrixClient(next_event_id="$user:server")
+    self_posts: list[str] = []
+    io = MatrixIO(
+        bot_client,
+        room_id="!default:server",
+        user_client=user_client,
+        on_self_post=self_posts.append,
+    )
+    eid = await io.post_in_thread("$root:server", "from bot", as_user=False)
+    assert eid == "$bot:server"
+    assert len(bot_client.sent) == 1
+    assert user_client.sent == []
+    # No self-post recording — bot-account posts come back via sync and
+    # are filtered by event.sender == bot.user_id, not by event_id dedupe.
+    assert self_posts == []
+
+
+@pytest.mark.asyncio
+async def test_no_user_client_means_as_user_falls_back_to_bot_client() -> None:
+    bot_client = FakeMatrixClient(next_event_id="$bot:server")
+    io = MatrixIO(bot_client, room_id="!default:server")
+    assert io.has_user_client() is False
+    # Requesting as_user with no user client wired: silently use the bot.
+    await io.post_in_thread("$root:server", "ok", as_user=True)
+    assert len(bot_client.sent) == 1
