@@ -452,3 +452,39 @@ async def test_response_event_clears_pending_question(tmp_db_path: str) -> None:
     await worker.stop()
     assert reg.get_pending_question("s1") is None
     reg.close()
+
+
+@pytest.mark.asyncio
+async def test_option_reply_suppresses_label_echo_in_subsequent_prompt(
+    tmp_db_path: str,
+) -> None:
+    """Replying '2' to AskUserQuestion → CC records the selected option's
+    LABEL as the user prompt. The worker pre-stages that label in the echo
+    set so the prompt event the transcript reader subsequently emits gets
+    suppressed (no duplicate 👤 mirror)."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    reg.set_pending_question(
+        "s1",
+        [
+            {"label": "Per-key RGB Matrix", "description": ""},
+            {"label": "Underglow only", "description": ""},
+        ],
+    )
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    # User picks option 2 via Matrix.
+    await worker.enqueue({"kind": "matrix_reply", "text": "2", "msg_ts": "$M1"})
+    # CC's transcript reader subsequently emits a prompt event with the
+    # selected option's label (because that's what CC recorded).
+    await worker.enqueue(
+        {"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "Underglow only"}
+    )
+    await worker.stop()
+    # The option-label prompt was suppressed — no 👤 mirror back to Matrix.
+    assert matrix.posts == []
+    reg.close()

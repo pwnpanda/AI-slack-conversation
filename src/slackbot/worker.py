@@ -205,6 +205,17 @@ class Worker:
             if option_index is not None:
                 keys = ["Down"] * option_index + ["Enter"]
                 await self._actuator.deliver_keys(sess.zellij_session, sess.zellij_pane_id, keys)
+                # CC's transcript records the selected option's LABEL as a
+                # user prompt, not the digit we received from Matrix.
+                # Pre-stage that label in the echo set so the resulting
+                # prompt event isn't mirrored back here as a duplicate
+                # 👤 message of what the user just answered.
+                if pending is not None:
+                    options = pending.get("options") or []
+                    if 0 <= option_index < len(options):
+                        label = options[option_index].get("label") or ""
+                        if label:
+                            self._remember_echo(label)
                 self._reg.clear_pending_question(self._sid)
             else:
                 await self._actuator.deliver(sess.zellij_session, sess.zellij_pane_id, text)
