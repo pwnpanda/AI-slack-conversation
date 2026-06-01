@@ -25,9 +25,7 @@ def _render_html(body: str) -> str:
     CC frequently produces in responses. `sane_lists` recognises lists
     that begin immediately after a paragraph without a blank line.
     """
-    return markdown.markdown(
-        body, extensions=["fenced_code", "nl2br", "tables", "sane_lists"]
-    )
+    return markdown.markdown(body, extensions=["fenced_code", "nl2br", "tables", "sane_lists"])
 
 
 def _text_content(body: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:

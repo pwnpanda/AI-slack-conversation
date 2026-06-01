@@ -488,3 +488,56 @@ async def test_option_reply_suppresses_label_echo_in_subsequent_prompt(
     # The option-label prompt was suppressed — no 👤 mirror back to Matrix.
     assert matrix.posts == []
     reg.close()
+
+
+@pytest.mark.asyncio
+async def test_ttl_fallback_suppresses_when_text_does_not_match(tmp_db_path: str) -> None:
+    """Matrix reply 'hello world' delivered. CC's transcript records the
+    same prompt but with extra surrounding whitespace / line breaks the
+    bot didn't send. Text-match misses, but the TTL counter records the
+    delivery and the next-arriving prompt is suppressed anyway."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    await worker.enqueue({"kind": "matrix_reply", "text": "hello world", "msg_ts": "$M1"})
+    # CC records a transformed version — different whitespace, no exact match.
+    await worker.enqueue(
+        {"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "hello  world\n\n(echo)"}
+    )
+    await worker.stop()
+    # Suppressed by TTL fallback — nothing mirrored back.
+    assert matrix.posts == []
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_ttl_fallback_expires_so_stale_slots_dont_swallow_real_prompts(
+    tmp_db_path: str,
+) -> None:
+    """If no prompt arrives within the window, the slot must expire so a
+    genuine CC-typed prompt long afterwards isn't mistakenly suppressed.
+    Simulated here by aging out every recorded deadline after delivery,
+    which is what the wallclock would do once 30s elapses."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    await worker.enqueue({"kind": "matrix_reply", "text": "hi", "msg_ts": "$M1"})
+    await worker._queue.join()  # ensure the deadline was recorded
+    worker._delivery_echo_deadlines = [0.0 for _ in worker._delivery_echo_deadlines]
+    worker._pending_echo.clear()  # isolate the TTL path from text-match
+    await worker.enqueue(
+        {"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "fresh user input"}
+    )
+    await worker.stop()
+    assert matrix.posts == [("$TOP1:server", "[Claude] 👤 fresh user input")]
+    reg.close()
