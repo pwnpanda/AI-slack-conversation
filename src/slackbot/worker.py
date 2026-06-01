@@ -9,7 +9,12 @@ import json
 import logging
 from typing import Any, Protocol
 
-from slackbot.events import chunk_for_matrix, format_event, parse_ask_user_question
+from slackbot.events import (
+    chunk_for_matrix,
+    format_event,
+    parse_ask_user_question,
+    top_level_text,
+)
 from slackbot.registry import Registry
 
 log = logging.getLogger(__name__)
@@ -18,6 +23,10 @@ log = logging.getLogger(__name__)
 _MAX_REMEMBERED_UUIDS = 1000
 # Cap on pending echo entries.
 _MAX_PENDING_ECHO = 64
+# How long the top-level "recent activity" marker (🟡) stays before
+# reverting to the steady-state 🟢. Any new bot post within this window
+# resets the timer.
+_RECENT_MARKER_SECONDS = 60.0
 
 
 def _option_index_for_reply(text: str, pending: dict | None) -> int | None:
@@ -80,6 +89,12 @@ class Worker:
         self._task: asyncio.Task[None] | None = None
         self._posted_uuids: list[str] = []  # FIFO bounded
         self._pending_echo: list[str] = []  # FIFO bounded
+        # "Recent activity" marker state on the top-level message. _fresh
+        # is True while the top-level shows 🟡; _stale_task is the
+        # asyncio.Task scheduled to flip back to 🟢 after silence.
+        self._fresh: bool = False
+        self._stale_task: asyncio.Task | None = None
+        self._inflight_marker_tasks: set[asyncio.Task] = set()
         # Pending notification (for resolved-marker editing) is persisted in
         # the registry, NOT in-memory — survives worker reap + daemon restart.
 
@@ -91,12 +106,19 @@ class Worker:
         await self._queue.put(event)
 
     async def stop(self) -> None:
-        """Drain the queue, then cancel the task."""
+        """Drain the queue, then cancel the task and any pending marker timers."""
         await self._queue.join()
         if self._task and not self._task.done():
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+        # Cancel any pending recent-marker revert tasks so they don't leak
+        # past worker stop / event-loop teardown.
+        for task in list(self._inflight_marker_tasks):
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     async def _run(self) -> None:
         while True:
@@ -177,6 +199,7 @@ class Worker:
             self._reg.set_pending_question(self._sid, question["options"])
         else:
             self._reg.clear_pending_question(self._sid)
+        await self._mark_thread_fresh()
 
     async def _on_error(self, ev: dict[str, Any]) -> None:
         await self._mark_pending_notification_resolved()
@@ -267,6 +290,62 @@ class Worker:
             )
         if uuid:
             self._remember_uuid(uuid)
+        await self._mark_thread_fresh()
+
+    async def _mark_thread_fresh(self) -> None:
+        """Switch the top-level marker to 🟡 (if not already) and schedule a
+        revert to 🟢 after silence.
+
+        Edit-on-burst-start: any subsequent posts within the window only
+        reset the timer, not re-edit. Edit-on-burst-end runs once per burst.
+        Skips the edit if the session isn't named / thread-bound — there's
+        no top-level to mark.
+        """
+        sess = self._reg.get_session(self._sid)
+        if sess is None or sess.name is None or sess.matrix_thread_root is None:
+            return
+        if sess.status != "active":
+            return
+        # Cancel any pending revert; this burst extends the window.
+        if self._stale_task is not None and not self._stale_task.done():
+            self._stale_task.cancel()
+        if not self._fresh:
+            try:
+                await self._matrix.edit_top_level(
+                    sess.matrix_thread_root,
+                    top_level_text(sess.name, sess.cwd, sess.status, sess.agent, recent=True),
+                    room_id=sess.matrix_room_id,
+                )
+                self._fresh = True
+            except Exception:
+                log.exception("worker[%s] failed to mark thread fresh", self._sid)
+                return
+        # Schedule the revert. Hold a strong ref (RUF006) so asyncio doesn't
+        # garbage-collect the task mid-sleep.
+        task = asyncio.create_task(self._revert_thread_marker_after_delay())
+        self._stale_task = task
+        self._inflight_marker_tasks.add(task)
+        task.add_done_callback(self._inflight_marker_tasks.discard)
+
+    async def _revert_thread_marker_after_delay(self) -> None:
+        try:
+            await asyncio.sleep(_RECENT_MARKER_SECONDS)
+        except asyncio.CancelledError:
+            return
+        sess = self._reg.get_session(self._sid)
+        if sess is None or sess.name is None or sess.matrix_thread_root is None:
+            self._fresh = False
+            return
+        try:
+            await self._matrix.edit_top_level(
+                sess.matrix_thread_root,
+                top_level_text(sess.name, sess.cwd, sess.status, sess.agent, recent=False),
+                room_id=sess.matrix_room_id,
+            )
+        except Exception:
+            log.exception("worker[%s] failed to revert thread marker", self._sid)
+        finally:
+            self._fresh = False
 
     def _remember_uuid(self, uuid: str) -> None:
         self._posted_uuids.append(uuid)

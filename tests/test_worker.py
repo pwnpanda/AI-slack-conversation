@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass, field
 
 import pytest
@@ -219,8 +220,8 @@ async def test_notification_is_marked_resolved_on_next_prompt(tmp_db_path: str) 
 
     # We posted the notification, then the prompt, then EDITED the notification.
     assert len(matrix.posts) == 2  # notification + prompt
-    assert len(matrix.edits) == 1
-    edited_ts, edited_text = matrix.edits[0]
+    assert len([e for e in matrix.edits if "resolved" in e[1]]) == 1
+    edited_ts, edited_text = next(e for e in matrix.edits if "resolved" in e[1])
     assert "resolved" in edited_text
     assert "Claude waiting" in edited_text
     reg.close()
@@ -241,8 +242,8 @@ async def test_notification_is_marked_resolved_on_response(tmp_db_path: str) -> 
     await worker.enqueue({"kind": "response", "uuid": "a1", "parentUuid": "u1", "text": "done"})
     await worker.stop()
 
-    assert len(matrix.edits) == 1
-    assert "resolved" in matrix.edits[0][1]
+    assert len([e for e in matrix.edits if "resolved" in e[1]]) == 1
+    assert any("resolved" in e[1] for e in matrix.edits)
     reg.close()
 
 
@@ -261,8 +262,8 @@ async def test_notification_is_marked_resolved_on_matrix_reply(tmp_db_path: str)
     await worker.enqueue({"kind": "matrix_reply", "text": "1", "msg_ts": "$MSG1:server"})
     await worker.stop()
 
-    assert len(matrix.edits) == 1
-    assert "resolved" in matrix.edits[0][1]
+    assert len([e for e in matrix.edits if "resolved" in e[1]]) == 1
+    assert any("resolved" in e[1] for e in matrix.edits)
     reg.close()
 
 
@@ -287,8 +288,8 @@ async def test_back_to_back_notifications_resolve_previous(tmp_db_path: str) -> 
     assert len(matrix.posts) == 2
     first_ts = "$thr.1"
     second_ts = "$thr.2"
-    assert len(matrix.edits) == 1
-    edited_ts, edited_text = matrix.edits[0]
+    assert len([e for e in matrix.edits if "resolved" in e[1]]) == 1
+    edited_ts, edited_text = next(e for e in matrix.edits if "resolved" in e[1])
     assert edited_ts == first_ts
     assert "resolved" in edited_text
     assert "first?" in edited_text
@@ -316,7 +317,7 @@ async def test_no_pending_notification_is_a_noop(tmp_db_path: str) -> None:
     await worker.enqueue({"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "hi"})
     await worker.stop()
 
-    assert matrix.edits == []
+    assert [e for e in matrix.edits if "resolved" in e[1]] == []
     reg.close()
 
 
@@ -487,4 +488,41 @@ async def test_option_reply_suppresses_label_echo_in_subsequent_prompt(
     await worker.stop()
     # The option-label prompt was suppressed — no 👤 mirror back to Matrix.
     assert matrix.posts == []
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_mirror_marks_thread_fresh_with_yellow_marker(
+    tmp_db_path: str, monkeypatch
+) -> None:
+    """A mirrored response edits the top-level to 🟡 once, and schedules a
+    revert. Subsequent mirrors within the window reset the timer without
+    re-editing (no edit storm during a burst)."""
+    import slackbot.worker as worker_mod
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    # Disable the scheduled revert sleep — we only care about the mark side.
+    monkeypatch.setattr(worker_mod, "_RECENT_MARKER_SECONDS", 0.01)
+    await worker.start()
+    await worker.enqueue({"kind": "response", "uuid": "r1", "parentUuid": "u1", "text": "first"})
+    await worker.enqueue({"kind": "response", "uuid": "r2", "parentUuid": "u1", "text": "second"})
+    await worker.enqueue({"kind": "response", "uuid": "r3", "parentUuid": "u1", "text": "third"})
+    await worker._queue.join()
+    # Three responses mirrored — but only one mark edit (🆕), because each
+    # subsequent mirror saw _fresh=True and only reset the timer.
+    fresh_edits = [e for e in matrix.edits if "🆕" in e[1]]
+    assert len(fresh_edits) == 1
+    # Both edits keep the leading 🟢 — the marker is a trailing suffix
+    # so the colour doesn't flicker in Element's room list.
+    assert all(e[1].startswith("🟢 ") for e in matrix.edits)
+    # Wait long enough for the revert task to fire (using the shortened delay).
+    await asyncio.sleep(0.1)
+    revert_edits = [e for e in matrix.edits if "🆕" not in e[1]]
+    assert len(revert_edits) >= 1
+    await worker.stop()
     reg.close()

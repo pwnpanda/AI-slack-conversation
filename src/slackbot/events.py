@@ -30,10 +30,24 @@ def agent_label(agent: str | None) -> str:
     return labels.get((agent or "claude").lower(), "Claude")
 
 
-def top_level_text(name: str, cwd: str, status: str, agent: str | None = None) -> str:
+def top_level_text(
+    name: str,
+    cwd: str,
+    status: str,
+    agent: str | None = None,
+    recent: bool = False,
+) -> str:
+    """Render a session's top-level header line.
+
+    `recent=True` appends a trailing 🆕 marker to highlight that the bot
+    has posted into this thread within the last N seconds. The leading
+    🟢/⚪ status glyph stays constant so the only visible change in
+    Element's thread list is the trailing emoji appearing/disappearing.
+    """
     prefix = f"[{agent_label(agent)}] "
     if status == "active":
-        return f"🟢 {prefix}{name}  ·  {cwd}"
+        suffix = "  🆕" if recent else ""
+        return f"🟢 {prefix}{name}  ·  {cwd}{suffix}"
     return f"⚪ {prefix}{name}  ·  {cwd}  (ended)"
 
 
