@@ -7,7 +7,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import time
 from typing import Any, Protocol
 
 from slackbot.events import chunk_for_matrix, format_event, parse_ask_user_question
@@ -19,13 +18,6 @@ log = logging.getLogger(__name__)
 _MAX_REMEMBERED_UUIDS = 1000
 # Cap on pending echo entries.
 _MAX_PENDING_ECHO = 64
-# Counter-based echo fallback: any prompt arriving within this many seconds
-# of a Matrix delivery consumes one slot and is suppressed. Catches cases
-# where the text-match doesn't match (CC reformats the user's input, the
-# AskUserQuestion option-label case, leading/trailing whitespace from
-# different clients, etc.). 30s is comfortably longer than any CC->transcript
-# round-trip seen in practice.
-_DELIVERY_ECHO_WINDOW_SECONDS = 30.0
 
 
 def _option_index_for_reply(text: str, pending: dict | None) -> int | None:
@@ -88,10 +80,6 @@ class Worker:
         self._task: asyncio.Task[None] | None = None
         self._posted_uuids: list[str] = []  # FIFO bounded
         self._pending_echo: list[str] = []  # FIFO bounded
-        # Monotonic deadlines for the counter-based echo fallback. One slot
-        # per Matrix delivery; consumed by the next prompt event within the
-        # window. Pruned of expired entries on every prompt arrival.
-        self._delivery_echo_deadlines: list[float] = []
         # Pending notification (for resolved-marker editing) is persisted in
         # the registry, NOT in-memory — survives worker reap + daemon restart.
 
@@ -130,30 +118,13 @@ class Worker:
 
     async def _on_prompt(self, ev: dict[str, Any]) -> None:
         text = ev.get("text", "")
-        if self._consume_echo(text):
+        key = _echo_key(text)
+        if key in self._pending_echo:
+            self._pending_echo.remove(key)
             log.debug("worker[%s] echo suppressed: %r", self._sid, text)
             return
         await self._mark_pending_notification_resolved()
         await self._mirror("prompt", {"text": text}, ev.get("uuid"))
-
-    def _consume_echo(self, text: str) -> bool:
-        """True if this prompt is a Matrix-delivered echo to be suppressed.
-
-        Prefer exact-text matching (handles concurrent CC-typed prompts
-        cleanly), fall back to a TTL counter (catches reformatted /
-        whitespace-mangled / option-label cases where the literal text in
-        CC's transcript doesn't match what we delivered).
-        """
-        key = _echo_key(text)
-        if key in self._pending_echo:
-            self._pending_echo.remove(key)
-            return True
-        now = time.monotonic()
-        self._delivery_echo_deadlines = [d for d in self._delivery_echo_deadlines if d > now]
-        if self._delivery_echo_deadlines:
-            self._delivery_echo_deadlines.pop(0)
-            return True
-        return False
 
     async def _on_response(self, ev: dict[str, Any]) -> None:
         uuid = ev.get("uuid")
@@ -263,11 +234,6 @@ class Worker:
             return
         if option_index is None:
             self._remember_echo(text)
-        # Always record a TTL slot — covers cases where CC reformats the
-        # user's input (newline normalization, AskUserQuestion option
-        # labels, etc.) so the next prompt event still gets suppressed
-        # even when text-match misses.
-        self._delivery_echo_deadlines.append(time.monotonic() + _DELIVERY_ECHO_WINDOW_SECONDS)
         await self._mark_pending_notification_resolved()
         await self._matrix.react(msg_ts, "white_check_mark", room_id=room_id)
 
