@@ -62,7 +62,7 @@ chmod 600 ~/.config/claude-slack-bot/env
 ### 3. Install the daemon
 
 ```bash
-cd ~/git/priv/claude-slack-bot
+cd ~/git/Private/AI-slack-conversation
 uv venv && uv sync
 mkdir -p ~/.config/systemd/user
 cp systemd/claude-slack-bot.service ~/.config/systemd/user/
@@ -76,9 +76,9 @@ Expected status: `active (running)`.
 ### 4. Install the agent hooks
 
 ```bash
-bash ~/git/priv/claude-slack-bot/hooks/install.sh
-bash ~/git/priv/claude-slack-bot/hooks/install-codex.sh
-bash ~/git/priv/claude-slack-bot/hooks/install-gemini.sh
+bash ~/git/Private/AI-slack-conversation/hooks/install.sh
+bash ~/git/Private/AI-slack-conversation/hooks/install-codex.sh
+bash ~/git/Private/AI-slack-conversation/hooks/install-gemini.sh
 ```
 
 This installs the bridge hooks for Claude, Codex, and Gemini:
@@ -104,7 +104,7 @@ Install **Element X** on Android (or iOS). Log in as your human user against `ch
 ## Testing
 
 ```bash
-cd ~/git/priv/claude-slack-bot
+cd ~/git/Private/AI-slack-conversation
 uv run pytest -v
 uv run ruff check . && uv run ruff format --check .
 shellcheck hooks/*.sh
