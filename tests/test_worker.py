@@ -495,9 +495,7 @@ async def test_option_reply_suppresses_label_echo_in_subsequent_prompt(
 
 
 @pytest.mark.asyncio
-async def test_mirror_marks_thread_fresh_with_yellow_marker(
-    tmp_db_path: str, monkeypatch
-) -> None:
+async def test_mirror_marks_thread_fresh_with_yellow_marker(tmp_db_path: str, monkeypatch) -> None:
     """A mirrored response edits the top-level to 🟡 once, and schedules a
     revert. Subsequent mirrors within the window reset the timer without
     re-editing (no edit storm during a burst)."""
@@ -560,9 +558,7 @@ async def test_prompts_post_as_user_without_prefix_when_user_client_present(
     matrix = FakeMatrixIOWithUserClient()
     worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
     await worker.start()
-    await worker.enqueue(
-        {"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "hi there"}
-    )
+    await worker.enqueue({"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "hi there"})
     await worker.stop()
     # No prefix; posted via the user path.
     assert matrix.posts_with_flag == [("$TOP1:server", "hi there", True)]
@@ -580,9 +576,7 @@ async def test_responses_still_post_as_bot_even_with_user_client(tmp_db_path: st
     matrix = FakeMatrixIOWithUserClient()
     worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
     await worker.start()
-    await worker.enqueue(
-        {"kind": "response", "uuid": "r1", "parentUuid": "u1", "text": "answer"}
-    )
+    await worker.enqueue({"kind": "response", "uuid": "r1", "parentUuid": "u1", "text": "answer"})
     await worker.stop()
     # Bot path: as_user is False.
     matching = [p for p in matrix.posts_with_flag if p[1].startswith("[Claude] 🤖")]
