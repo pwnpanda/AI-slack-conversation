@@ -3,13 +3,14 @@
 Bridge between Claude Code, Codex, and Gemini CLI sessions and Matrix: mirrors selected agent sessions into Matrix threads, and types your Matrix replies back into the originating Zellij pane.
 
 > **Primary branch: `ai-zellij-session`.** This is the canonical / main
-> usage branch going forward — it carries the dedicated-`ai`-zellij-session
-> behaviour (`/new` and `/resume` spawn agent panes into the `ai` session,
-> never the human's `main`) plus the `zellij-ai` systemd bootstrap. It is
-> intentionally **not merged into `main`**; treat this branch as the source
-> of truth. The deployed systemd unit still runs from the `main` checkout,
-> so switching the running daemon over means pointing it at this branch
-> (or merging) — deferred by choice, not pending work.
+> usage branch and the one the daemon runs from on the canonical host. It
+> carries the dedicated-`ai`-zellij-session behaviour (`/new` and `/resume`
+> spawn agent panes into the `ai` session, never the human's `main`) plus
+> the `zellij-ai` systemd bootstrap, on top of everything in `main`
+> (Matrix transport, markdown/table rendering, user-account mirroring,
+> AskUserQuestion handling). It is intentionally **not fast-forwarded into
+> `main`**; treat this branch as the source of truth and check it out
+> directly. `main` is kept as a plain-Matrix baseline.
 
 > Migrated from Slack to Matrix on the `matrix-port` branch. The repo name (`claude-slack-bot`) and Python package (`slackbot`) are unchanged from the Slack era; the transport underneath them is now Matrix.
 
@@ -70,9 +71,17 @@ chmod 600 ~/.config/claude-slack-bot/env
 
 ### 3. Install the daemon
 
+The systemd unit is host-agnostic: it runs from a stable symlink
+(`~/.local/share/claude-slack-bot/app`) so the same unit works regardless
+of where the repo is cloned (see "Multi-host deployment" below). Run these
+from inside your checkout — wherever it lives:
+
 ```bash
-cd ~/git/Private/AI-slack-conversation
+cd "$(git rev-parse --show-toplevel)"   # your checkout
 uv venv && uv sync
+# Point the stable symlink at this checkout:
+mkdir -p ~/.local/share/claude-slack-bot
+ln -sfn "$PWD" ~/.local/share/claude-slack-bot/app
 mkdir -p ~/.config/systemd/user
 cp systemd/claude-slack-bot.service ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -85,9 +94,10 @@ Expected status: `active (running)`.
 ### 4. Install the agent hooks
 
 ```bash
-bash ~/git/Private/AI-slack-conversation/hooks/install.sh
-bash ~/git/Private/AI-slack-conversation/hooks/install-codex.sh
-bash ~/git/Private/AI-slack-conversation/hooks/install-gemini.sh
+cd "$(git rev-parse --show-toplevel)"
+bash hooks/install.sh
+bash hooks/install-codex.sh
+bash hooks/install-gemini.sh
 ```
 
 This installs the bridge hooks for Claude, Codex, and Gemini:
@@ -113,7 +123,7 @@ Install **Element X** on Android (or iOS). Log in as your human user against `ch
 ## Testing
 
 ```bash
-cd ~/git/Private/AI-slack-conversation
+cd "$(git rev-parse --show-toplevel)"
 uv run pytest -v
 uv run ruff check . && uv run ruff format --check .
 shellcheck hooks/*.sh
@@ -153,6 +163,24 @@ Then in Element X: reply to the thread; verify text appears typed into Zellij pa
 ```bash
 journalctl --user -u claude-slack-bot -f
 ```
+
+### Multi-host deployment
+
+The bot runs on more than one machine whose clone lives at a different
+path (canonical host: `~/git/priv/claude-slack-bot`; another at
+`~/git/Private/AI-slack-conversation`). To keep a single tracked systemd
+unit working everywhere, the unit references a per-host symlink rather
+than a hard-coded checkout path:
+
+```
+~/.local/share/claude-slack-bot/app  ->  <this host's checkout>
+```
+
+Each host creates that symlink once (step 3 of Install). The tracked
+`systemd/claude-slack-bot.service` is then identical on every host — no
+per-host edits, no path-fix commits that break the other machine on the
+next `git pull`. To move the daemon to a different checkout on a host,
+just re-point the symlink and `systemctl --user restart claude-slack-bot`.
 
 ## Implemented features
 

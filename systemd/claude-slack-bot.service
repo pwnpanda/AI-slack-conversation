@@ -6,8 +6,13 @@ Wants=network-online.target
 [Service]
 Type=notify
 EnvironmentFile=%h/.config/claude-slack-bot/env
-WorkingDirectory=%h/git/Private/AI-slack-conversation
-ExecStart=%h/git/Private/AI-slack-conversation/.venv/bin/python -m slackbot
+# Host-agnostic path: each host symlinks ~/.local/share/claude-slack-bot/app
+# at its own checkout (see README "Multi-host deployment"). This keeps the
+# unit identical across machines whose clone lives at a different path
+# (e.g. ~/git/priv/claude-slack-bot vs ~/git/Private/AI-slack-conversation),
+# instead of hard-coding either path and breaking the other host on pull.
+WorkingDirectory=%h/.local/share/claude-slack-bot/app
+ExecStart=%h/.local/share/claude-slack-bot/app/.venv/bin/python -m slackbot
 Restart=always
 RestartSec=3
 WatchdogSec=600
