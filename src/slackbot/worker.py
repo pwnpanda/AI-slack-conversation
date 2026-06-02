@@ -9,7 +9,12 @@ import json
 import logging
 from typing import Any, Protocol
 
-from slackbot.events import format_event
+from slackbot.events import (
+    chunk_for_matrix,
+    format_event,
+    parse_ask_user_question,
+    top_level_text,
+)
 from slackbot.registry import Registry
 
 log = logging.getLogger(__name__)
@@ -18,6 +23,27 @@ log = logging.getLogger(__name__)
 _MAX_REMEMBERED_UUIDS = 1000
 # Cap on pending echo entries.
 _MAX_PENDING_ECHO = 64
+# How long the top-level "recent activity" marker (🟡) stays before
+# reverting to the steady-state 🟢. Any new bot post within this window
+# resets the timer.
+_RECENT_MARKER_SECONDS = 60.0
+
+
+def _option_index_for_reply(text: str, pending: dict | None) -> int | None:
+    """Return zero-based option index if *text* is a bare option number and a
+    question is pending with that option. None means "deliver as text"."""
+    if pending is None:
+        return None
+    options = pending.get("options") if isinstance(pending, dict) else None
+    if not isinstance(options, list) or not options:
+        return None
+    stripped = text.strip()
+    if not stripped.isdigit():
+        return None
+    idx = int(stripped) - 1
+    if 0 <= idx < len(options):
+        return idx
+    return None
 
 
 def _echo_key(text: str) -> str:
@@ -34,9 +60,16 @@ def _echo_key(text: str) -> str:
 
 class _MatrixIOProto(Protocol):
     def room_for_agent(self, agent: str) -> str: ...
-    async def post_top_level(self, text: str, room_id: str | None = None) -> str: ...
+    def has_user_client(self) -> bool: ...
+    async def post_top_level(
+        self, text: str, room_id: str | None = None, as_user: bool = False
+    ) -> str: ...
     async def post_in_thread(
-        self, thread_root: str, text: str, room_id: str | None = None
+        self,
+        thread_root: str,
+        text: str,
+        room_id: str | None = None,
+        as_user: bool = False,
     ) -> str: ...
     async def edit_top_level(self, ts: str, text: str, room_id: str | None = None) -> None: ...
     async def react(self, ts: str, emoji: str, room_id: str | None = None) -> None: ...
@@ -44,6 +77,7 @@ class _MatrixIOProto(Protocol):
 
 class _ActuatorProto(Protocol):
     async def deliver(self, session: str, pane_id: str, text: str) -> None: ...
+    async def deliver_keys(self, session: str, pane_id: str, keys: list[str]) -> None: ...
 
 
 class Worker:
@@ -62,6 +96,12 @@ class Worker:
         self._task: asyncio.Task[None] | None = None
         self._posted_uuids: list[str] = []  # FIFO bounded
         self._pending_echo: list[str] = []  # FIFO bounded
+        # "Recent activity" marker state on the top-level message. _fresh
+        # is True while the top-level shows 🟡; _stale_task is the
+        # asyncio.Task scheduled to flip back to 🟢 after silence.
+        self._fresh: bool = False
+        self._stale_task: asyncio.Task | None = None
+        self._inflight_marker_tasks: set[asyncio.Task] = set()
         # Pending notification (for resolved-marker editing) is persisted in
         # the registry, NOT in-memory — survives worker reap + daemon restart.
 
@@ -73,12 +113,19 @@ class Worker:
         await self._queue.put(event)
 
     async def stop(self) -> None:
-        """Drain the queue, then cancel the task."""
+        """Drain the queue, then cancel the task and any pending marker timers."""
         await self._queue.join()
         if self._task and not self._task.done():
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+        # Cancel any pending recent-marker revert tasks so they don't leak
+        # past worker stop / event-loop teardown.
+        for task in list(self._inflight_marker_tasks):
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     async def _run(self) -> None:
         while True:
@@ -113,6 +160,9 @@ class Worker:
         if uuid in self._posted_uuids:
             return
         await self._mark_pending_notification_resolved()
+        # A fresh assistant response means CC consumed the prior question's
+        # answer; any stale pending_question state is no longer relevant.
+        self._reg.clear_pending_question(self._sid)
         data: dict[str, Any] = {"text": ev.get("text", "")}
         tool_summary = ev.get("tool_summary")
         if tool_summary:
@@ -134,11 +184,29 @@ class Worker:
             return
         await self._mark_pending_notification_resolved()
         text = format_event("notification", data)
-        event_id = await self._matrix.post_in_thread(
-            sess.matrix_thread_root, text, room_id=sess.matrix_room_id
+        chunks = chunk_for_matrix(text)
+        first_event_id = None
+        for chunk in chunks:
+            event_id = await self._matrix.post_in_thread(
+                sess.matrix_thread_root, chunk, room_id=sess.matrix_room_id
+            )
+            if first_event_id is None:
+                first_event_id = event_id
+        # Persist the first chunk's event_id so the resolved-marker edit
+        # lands on the head of the notification (not a continuation chunk).
+        assert first_event_id is not None
+        self._reg.set_pending_notification(
+            self._sid, first_event_id, chunks[0], sess.matrix_room_id
         )
-        # Persist so the resolved-marker edit survives reaping + restart.
-        self._reg.set_pending_notification(self._sid, event_id, text, sess.matrix_room_id)
+        # If this notification is an AskUserQuestion, remember the option list
+        # so a numeric reply navigates by arrow keys rather than landing in
+        # the "Other" text field. Any other notification clears the state.
+        question = parse_ask_user_question(str(ev.get("tool_request", "")))
+        if question is not None:
+            self._reg.set_pending_question(self._sid, question["options"])
+        else:
+            self._reg.clear_pending_question(self._sid)
+        await self._mark_thread_fresh()
 
     async def _on_error(self, ev: dict[str, Any]) -> None:
         await self._mark_pending_notification_resolved()
@@ -158,8 +226,34 @@ class Worker:
                 room_id=room_id,
             )
             return
+        # If CC is mid-AskUserQuestion and the reply is a bare option number,
+        # navigate the TUI with arrow keys instead of typing the digit (which
+        # would land in the "Other" free-text field on CC's question UI).
+        pending = self._reg.get_pending_question(self._sid)
+        option_index = _option_index_for_reply(text, pending)
         try:
-            await self._actuator.deliver(sess.zellij_session, sess.zellij_pane_id, text)
+            if option_index is not None:
+                keys = ["Down"] * option_index + ["Enter"]
+                await self._actuator.deliver_keys(sess.zellij_session, sess.zellij_pane_id, keys)
+                # CC's transcript records the selected option's LABEL as a
+                # user prompt, not the digit we received from Matrix.
+                # Pre-stage that label in the echo set so the resulting
+                # prompt event isn't mirrored back here as a duplicate
+                # 👤 message of what the user just answered.
+                if pending is not None:
+                    options = pending.get("options") or []
+                    if 0 <= option_index < len(options):
+                        label = options[option_index].get("label") or ""
+                        if label:
+                            self._remember_echo(label)
+                self._reg.clear_pending_question(self._sid)
+            else:
+                await self._actuator.deliver(sess.zellij_session, sess.zellij_pane_id, text)
+                # Free-form text answer goes into the "Other" field if a
+                # question was pending; clear state so the next reply isn't
+                # mis-routed if CC actually moved past the question.
+                if pending is not None:
+                    self._reg.clear_pending_question(self._sid)
         except Exception as exc:
             await self._matrix.post_in_thread(
                 sess.matrix_thread_root or "",
@@ -168,7 +262,8 @@ class Worker:
             )
             await self._matrix.react(msg_ts, "warning", room_id=room_id)
             return
-        self._remember_echo(text)
+        if option_index is None:
+            self._remember_echo(text)
         await self._mark_pending_notification_resolved()
         await self._matrix.react(msg_ts, "white_check_mark", room_id=room_id)
 
@@ -195,12 +290,82 @@ class Worker:
             # Buffer for replay when /rn or auto-recovery binds the thread.
             self._reg.buffer_event(self._sid, kind, json.dumps({**data, "agent": sess.agent}))
             return
-        text = format_event(kind, {**data, "agent": sess.agent})
-        await self._matrix.post_in_thread(
-            sess.matrix_thread_root, text, room_id=sess.matrix_room_id
-        )
+        # Prompts originate from the human; if a user-puppet client is wired
+        # up, post them under the user's identity with no '[Claude] 👤'
+        # prefix — Element shows the user's avatar/displayname inline so
+        # the agent-label is redundant and the human-outline emoji is
+        # double-redundant. Bot output (responses, errors, notifications)
+        # keeps its prefix and posts as the bot account.
+        as_user = kind == "prompt" and self._matrix.has_user_client()
+        if as_user:
+            text = str(data.get("text", ""))
+        else:
+            text = format_event(kind, {**data, "agent": sess.agent})
+        for chunk in chunk_for_matrix(text):
+            await self._matrix.post_in_thread(
+                sess.matrix_thread_root,
+                chunk,
+                room_id=sess.matrix_room_id,
+                as_user=as_user,
+            )
         if uuid:
             self._remember_uuid(uuid)
+        await self._mark_thread_fresh()
+
+    async def _mark_thread_fresh(self) -> None:
+        """Switch the top-level marker to 🟡 (if not already) and schedule a
+        revert to 🟢 after silence.
+
+        Edit-on-burst-start: any subsequent posts within the window only
+        reset the timer, not re-edit. Edit-on-burst-end runs once per burst.
+        Skips the edit if the session isn't named / thread-bound — there's
+        no top-level to mark.
+        """
+        sess = self._reg.get_session(self._sid)
+        if sess is None or sess.name is None or sess.matrix_thread_root is None:
+            return
+        if sess.status != "active":
+            return
+        # Cancel any pending revert; this burst extends the window.
+        if self._stale_task is not None and not self._stale_task.done():
+            self._stale_task.cancel()
+        if not self._fresh:
+            try:
+                await self._matrix.edit_top_level(
+                    sess.matrix_thread_root,
+                    top_level_text(sess.name, sess.cwd, sess.status, sess.agent, recent=True),
+                    room_id=sess.matrix_room_id,
+                )
+                self._fresh = True
+            except Exception:
+                log.exception("worker[%s] failed to mark thread fresh", self._sid)
+                return
+        # Schedule the revert. Hold a strong ref (RUF006) so asyncio doesn't
+        # garbage-collect the task mid-sleep.
+        task = asyncio.create_task(self._revert_thread_marker_after_delay())
+        self._stale_task = task
+        self._inflight_marker_tasks.add(task)
+        task.add_done_callback(self._inflight_marker_tasks.discard)
+
+    async def _revert_thread_marker_after_delay(self) -> None:
+        try:
+            await asyncio.sleep(_RECENT_MARKER_SECONDS)
+        except asyncio.CancelledError:
+            return
+        sess = self._reg.get_session(self._sid)
+        if sess is None or sess.name is None or sess.matrix_thread_root is None:
+            self._fresh = False
+            return
+        try:
+            await self._matrix.edit_top_level(
+                sess.matrix_thread_root,
+                top_level_text(sess.name, sess.cwd, sess.status, sess.agent, recent=False),
+                room_id=sess.matrix_room_id,
+            )
+        except Exception:
+            log.exception("worker[%s] failed to revert thread marker", self._sid)
+        finally:
+            self._fresh = False
 
     def _remember_uuid(self, uuid: str) -> None:
         self._posted_uuids.append(uuid)

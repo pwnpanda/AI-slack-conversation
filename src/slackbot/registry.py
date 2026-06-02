@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   cc_pid             INTEGER,
   transcript_path    TEXT,
   pending_notification TEXT,
+  pending_question TEXT,
   transcript_offset  INTEGER,
   created_at         INTEGER NOT NULL,
   last_event_at      INTEGER NOT NULL,
@@ -87,6 +88,19 @@ class Registry:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._drop_pre_matrix_schema_if_present()
         self._conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Idempotent column additions for existing DBs.
+
+        executescript(_SCHEMA) uses CREATE TABLE IF NOT EXISTS, so columns
+        added to the schema after the table was first created don't appear
+        automatically. List each post-initial-schema column here.
+        """
+        conn = self._c()
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "pending_question" not in cols:
+            conn.execute("ALTER TABLE sessions ADD COLUMN pending_question TEXT")
 
     def _drop_pre_matrix_schema_if_present(self) -> None:
         """Detect a pre-Matrix schema (Slack columns) and discard the DB.
@@ -281,6 +295,47 @@ class Registry:
             return _json.loads(payload)
         except (ValueError, TypeError):
             return None
+
+    def set_pending_question(self, cc_session_id: str, options: list[dict]) -> None:
+        """Persist that CC is mid-AskUserQuestion. Reply routing reads this
+        so a numeric reply maps to the matching option (via arrow-key
+        navigation in the actuator) rather than typed verbatim into the
+        UI's "Other" text field."""
+        import json as _json
+
+        payload = _json.dumps({"options": options})
+        self._c().execute(
+            "UPDATE sessions SET pending_question = ? WHERE cc_session_id = ?",
+            (payload, cc_session_id),
+        )
+
+    def get_pending_question(self, cc_session_id: str) -> dict | None:
+        """Read pending_question WITHOUT clearing. Routing uses this so the
+        state survives across multiple reply attempts; explicit
+        clear_pending_question() fires after a successful delivery or when
+        CC's next response shows the question has advanced."""
+        import json as _json
+
+        row = (
+            self._c()
+            .execute(
+                "SELECT pending_question FROM sessions WHERE cc_session_id = ?",
+                (cc_session_id,),
+            )
+            .fetchone()
+        )
+        if row is None or row["pending_question"] is None:
+            return None
+        try:
+            return _json.loads(row["pending_question"])
+        except (ValueError, TypeError):
+            return None
+
+    def clear_pending_question(self, cc_session_id: str) -> None:
+        self._c().execute(
+            "UPDATE sessions SET pending_question = NULL WHERE cc_session_id = ?",
+            (cc_session_id,),
+        )
 
     def set_status(self, cc_session_id: str, status: str) -> None:
         self._c().execute(

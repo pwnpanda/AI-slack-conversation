@@ -19,12 +19,15 @@ class FakeMatrix:
     def room_for_agent(self, agent):
         return f"!{agent}:server"
 
-    async def post_top_level(self, text, room_id=None):
+    def has_user_client(self) -> bool:
+        return False
+
+    async def post_top_level(self, text, room_id=None, as_user=False):
         self.top_level.append(text)
         self._seq += 1
         return f"$top.{self._seq}"
 
-    async def post_in_thread(self, thread_root, text, room_id=None):
+    async def post_in_thread(self, thread_root, text, room_id=None, as_user=False):
         self.posts.append((thread_root, text))
         self._seq += 1
         return f"$thr.{self._seq}"

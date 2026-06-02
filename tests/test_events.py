@@ -17,10 +17,14 @@ def test_format_prompt_single_line() -> None:
     assert format_event("prompt", {"text": "hello", "agent": "claude"}) == "[Claude] 👤 hello"
 
 
-def test_format_prompt_multi_line_codeblock() -> None:
+def test_format_prompt_multi_line_renders_markdown() -> None:
+    """Multi-line prompt/response text is appended after a blank line so
+    Element renders its markdown structure (headings, lists, fenced code
+    blocks already in CC's output) natively — no outer code-block wrap,
+    which would render the whole reply as a monospaced raw-text listing."""
     out = format_event("prompt", {"text": "line1\nline2", "agent": "codex"})
-    assert out.startswith("[Codex] 👤\n```\n")
-    assert "line1\nline2" in out
+    assert out == "[Codex] 👤\n\nline1\nline2"
+    assert "```" not in out
 
 
 def test_format_response_with_tool_summary() -> None:
@@ -74,9 +78,9 @@ def test_format_notification_includes_context_tail() -> None:
             "context": "line1\nline2\nline3\nline4\nline5\nline6\nline7",
         },
     )
-    # Tail keeps last ~6 lines
+    # Full context preserved — the old tail-truncation was lossy and surprised users.
+    assert "line1" in out
     assert "line7" in out
-    assert "line1" not in out  # would be 7 lines back
 
 
 def test_format_notification_no_tool_request_no_hint() -> None:
@@ -113,3 +117,112 @@ def test_parse_rn_command_no_match() -> None:
     assert parse_rn_command("/rn") is None
     assert parse_rn_command("rename natural-language-prompt") is None
     assert parse_rn_command("register natural-language-prompt") is None
+
+
+def test_long_multiline_response_is_not_truncated() -> None:
+    """Replies must be preserved verbatim — no [truncated] tail. Chunking
+    is a separate concern handled by chunk_for_matrix."""
+    text = "\n".join(f"line {i}: " + ("x" * 60) for i in range(200))
+    out = format_event("response", {"text": text, "agent": "claude"})
+    assert "[truncated]" not in out
+    assert "line 199:" in out
+    assert text in out
+
+
+def test_long_notification_context_is_not_truncated() -> None:
+    """Notification context (tail of CC's pre-prompt output) must be
+    preserved verbatim; the old 'last 6 lines + 3000 char cap' is gone."""
+    ctx = "\n".join(f"output line {i}" for i in range(50))
+    out = format_event(
+        "notification",
+        {"message": "Claude needs your permission", "context": ctx, "agent": "claude"},
+    )
+    assert "output line 0" in out
+    assert "output line 49" in out
+
+
+def test_chunk_for_matrix_returns_single_chunk_when_short() -> None:
+    from slackbot.events import chunk_for_matrix
+
+    assert chunk_for_matrix("hello") == ["hello"]
+    big_but_under = "x" * 59_999
+    assert chunk_for_matrix(big_but_under) == [big_but_under]
+
+
+def test_chunk_for_matrix_splits_at_newline_boundary() -> None:
+    from slackbot.events import chunk_for_matrix
+
+    text = "\n".join(f"line {i}" for i in range(20000))  # well over 60k
+    chunks = chunk_for_matrix(text)
+    assert len(chunks) >= 2
+    # Every chunk after the first is marked as a continuation.
+    for c in chunks[1:]:
+        assert c.startswith("…(part ")
+    # Concatenation (stripping continuation markers) gets the original back.
+    rejoined = chunks[0]
+    for c in chunks[1:]:
+        rejoined += "\n" + c.split("\n", 1)[1]
+    assert rejoined == text
+
+
+def test_chunk_for_matrix_hard_slices_when_line_too_long() -> None:
+    from slackbot.events import chunk_for_matrix
+
+    # A single 100k-char line with no newlines: must still be split, no
+    # raise, no silent loss.
+    text = "y" * 100_000
+    chunks = chunk_for_matrix(text)
+    assert len(chunks) >= 2
+    # First chunk fits under the limit; total y count preserved.
+    assert sum(c.count("y") for c in chunks) == 100_000
+
+
+def test_parse_ask_user_question_extracts_first_question_and_options() -> None:
+    from slackbot.events import parse_ask_user_question
+
+    payload = (
+        'AskUserQuestion({"questions":[{"question":"Which RGB?","header":"RGB",'
+        '"multiSelect":false,"options":['
+        '{"label":"Per-key","description":"SK6812"},'
+        '{"label":"Underglow","description":""},'
+        '{"label":"None"}'
+        "]}]})"
+    )
+    q = parse_ask_user_question(payload)
+    assert q is not None
+    assert q["question"] == "Which RGB?"
+    assert [o["label"] for o in q["options"]] == ["Per-key", "Underglow", "None"]
+    assert q["options"][0]["description"] == "SK6812"
+    assert q["options"][2]["description"] == ""
+
+
+def test_parse_ask_user_question_returns_none_for_other_tools() -> None:
+    from slackbot.events import parse_ask_user_question
+
+    assert parse_ask_user_question('Bash({"command":"ls"})') is None
+    assert parse_ask_user_question("") is None
+    assert parse_ask_user_question("AskUserQuestion(not json)") is None
+    assert parse_ask_user_question('AskUserQuestion({"questions":[]})') is None
+    assert parse_ask_user_question('AskUserQuestion({"questions":[{}]})') is None
+
+
+def test_notification_format_uses_question_display_when_ask_user_question() -> None:
+    out = format_event(
+        "notification",
+        {
+            "message": "Claude needs your permission",
+            "tool_request": (
+                'AskUserQuestion({"questions":[{"question":"Pick one",'
+                '"options":[{"label":"Foo","description":""},'
+                '{"label":"Bar","description":"second"}]}]})'
+            ),
+            "agent": "claude",
+        },
+    )
+    # No 'approve/deny' template — wrong UI for AskUserQuestion.
+    assert "Reply `1` to approve" not in out
+    # Question and options shown.
+    assert "❓ Pick one" in out
+    assert "Foo" in out
+    assert "Bar" in out
+    assert "second" in out

@@ -1,8 +1,7 @@
 """Matrix-side slash-style commands typed as top-level room messages.
 
-Currently supports `/new <name>` which spawns a new CC pane in zellij and
-types `/rn <name>` into it after a short delay. CC's own session_start +
-/rn handling then creates the Matrix top-level message and binds the thread.
+`/new <name>` — spawn a fresh CC pane in zellij, type `/rn <name>` into it.
+`/resume <name>` — spawn a CC pane resuming the named session (`claude --resume <name>`).
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ from slackbot.registry import Registry
 log = logging.getLogger(__name__)
 
 _NEW_PATTERN = re.compile(r"^/new\s+(\S+)\s*$")
+_RESUME_PATTERN = re.compile(r"^/resume\s+(\S+)\s*$")
 
 
 class _MatrixIOProto(Protocol):
@@ -56,11 +56,16 @@ class MatrixCommandHandler:
 
     async def maybe_handle(self, room_id: str, text: str, msg_ts: str) -> bool:
         """Return True if *text* matched a command and was handled."""
-        m = _NEW_PATTERN.match(text.strip())
-        if not m:
-            return False
-        await self._handle_new(room_id=room_id, name=m.group(1), msg_ts=msg_ts)
-        return True
+        stripped = text.strip()
+        m = _NEW_PATTERN.match(stripped)
+        if m:
+            await self._handle_new(room_id=room_id, name=m.group(1), msg_ts=msg_ts)
+            return True
+        m = _RESUME_PATTERN.match(stripped)
+        if m:
+            await self._handle_resume(room_id=room_id, name=m.group(1), msg_ts=msg_ts)
+            return True
+        return False
 
     async def _handle_new(self, room_id: str, name: str, msg_ts: str) -> None:
         existing = self._reg.get_session_by_name(name, room_id=room_id)
@@ -87,6 +92,35 @@ class MatrixCommandHandler:
             await self._matrix.post_in_thread(
                 msg_ts,
                 f"❌ Failed to spawn new pane: {exc}",
+                room_id=room_id,
+            )
+            return
+        await self._matrix.react(msg_ts, "white_check_mark", room_id=room_id)
+
+    async def _handle_resume(self, room_id: str, name: str, msg_ts: str) -> None:
+        """Spawn a CC pane with `claude --resume <name>`.
+
+        Unlike /new, no /rn is typed afterwards — CC's own SessionStart
+        hook fires with the resumed session_id, and the existing registry
+        row (if any) is found by sid, so the Matrix thread re-binds
+        automatically. If the session name isn't already in the registry,
+        CC will still resume by name via the user's shell wrapper
+        (auto-resume.sh resolves names to ids); the bot just won't have
+        a prior thread to attach to until /rn fires.
+        """
+        await self._matrix.react(msg_ts, "hourglass_flowing_sand", room_id=room_id)
+        try:
+            await self._actuator.spawn_pane_with_command(
+                session=self._zellij_session,
+                command_argv=(*self._new_pane_command, "--resume", name),
+                initial_text="",
+                delay_seconds=self._new_pane_delay_seconds,
+            )
+        except Exception as exc:
+            log.exception("spawn_pane_with_command failed for /resume %s", name)
+            await self._matrix.post_in_thread(
+                msg_ts,
+                f"❌ Failed to spawn resume pane for `{name}`: {exc}",
                 room_id=room_id,
             )
             return

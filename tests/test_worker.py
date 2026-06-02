@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass, field
 
 import pytest
@@ -16,12 +17,15 @@ class FakeMatrixIO:
     def room_for_agent(self, agent: str) -> str:
         return f"!{agent}:server"
 
-    async def post_in_thread(self, thread_root, text, room_id=None):
+    def has_user_client(self) -> bool:
+        return False
+
+    async def post_in_thread(self, thread_root, text, room_id=None, as_user=False):
         self.posts.append((thread_root, text))
         self._seq += 1
         return f"$thr.{self._seq}"
 
-    async def post_top_level(self, text, room_id=None):
+    async def post_top_level(self, text, room_id=None, as_user=False):
         self.top_level_posts.append(text)
         self._seq += 1
         return f"$top.{self._seq}"
@@ -36,9 +40,13 @@ class FakeMatrixIO:
 @dataclass
 class FakeActuator:
     deliveries: list[tuple[str, str, str]] = field(default_factory=list)
+    key_deliveries: list[tuple[str, str, list[str]]] = field(default_factory=list)
 
     async def deliver(self, session, pane_id, text):
         self.deliveries.append((session, pane_id, text))
+
+    async def deliver_keys(self, session, pane_id, keys):
+        self.key_deliveries.append((session, pane_id, list(keys)))
 
 
 def _bound_session(reg, sid, agent="claude"):
@@ -215,8 +223,8 @@ async def test_notification_is_marked_resolved_on_next_prompt(tmp_db_path: str) 
 
     # We posted the notification, then the prompt, then EDITED the notification.
     assert len(matrix.posts) == 2  # notification + prompt
-    assert len(matrix.edits) == 1
-    edited_ts, edited_text = matrix.edits[0]
+    assert len([e for e in matrix.edits if "resolved" in e[1]]) == 1
+    edited_ts, edited_text = next(e for e in matrix.edits if "resolved" in e[1])
     assert "resolved" in edited_text
     assert "Claude waiting" in edited_text
     reg.close()
@@ -237,8 +245,8 @@ async def test_notification_is_marked_resolved_on_response(tmp_db_path: str) -> 
     await worker.enqueue({"kind": "response", "uuid": "a1", "parentUuid": "u1", "text": "done"})
     await worker.stop()
 
-    assert len(matrix.edits) == 1
-    assert "resolved" in matrix.edits[0][1]
+    assert len([e for e in matrix.edits if "resolved" in e[1]]) == 1
+    assert any("resolved" in e[1] for e in matrix.edits)
     reg.close()
 
 
@@ -257,8 +265,8 @@ async def test_notification_is_marked_resolved_on_matrix_reply(tmp_db_path: str)
     await worker.enqueue({"kind": "matrix_reply", "text": "1", "msg_ts": "$MSG1:server"})
     await worker.stop()
 
-    assert len(matrix.edits) == 1
-    assert "resolved" in matrix.edits[0][1]
+    assert len([e for e in matrix.edits if "resolved" in e[1]]) == 1
+    assert any("resolved" in e[1] for e in matrix.edits)
     reg.close()
 
 
@@ -283,8 +291,8 @@ async def test_back_to_back_notifications_resolve_previous(tmp_db_path: str) -> 
     assert len(matrix.posts) == 2
     first_ts = "$thr.1"
     second_ts = "$thr.2"
-    assert len(matrix.edits) == 1
-    edited_ts, edited_text = matrix.edits[0]
+    assert len([e for e in matrix.edits if "resolved" in e[1]]) == 1
+    edited_ts, edited_text = next(e for e in matrix.edits if "resolved" in e[1])
     assert edited_ts == first_ts
     assert "resolved" in edited_text
     assert "first?" in edited_text
@@ -312,5 +320,271 @@ async def test_no_pending_notification_is_a_noop(tmp_db_path: str) -> None:
     await worker.enqueue({"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "hi"})
     await worker.stop()
 
-    assert matrix.edits == []
+    assert [e for e in matrix.edits if "resolved" in e[1]] == []
     reg.close()
+
+
+@pytest.mark.asyncio
+async def test_numeric_reply_during_ask_user_question_uses_arrow_keys(
+    tmp_db_path: str,
+) -> None:
+    """When a question is pending, replying '2' navigates the TUI with
+    Down+Enter rather than typing the digit (which would land in 'Other')."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    reg.set_pending_question(
+        "s1",
+        [
+            {"label": "Per-key RGB", "description": ""},
+            {"label": "Underglow", "description": ""},
+            {"label": "None", "description": ""},
+        ],
+    )
+    matrix = FakeMatrixIO()
+    actuator = FakeActuator()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=actuator)
+    await worker.start()
+    await worker.enqueue({"kind": "matrix_reply", "text": "2", "msg_ts": "$M1"})
+    await worker.stop()
+
+    assert actuator.deliveries == []
+    assert actuator.key_deliveries == [("main", "13", ["Down", "Enter"])]
+    assert reg.get_pending_question("s1") is None  # consumed on success
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_freeform_reply_during_ask_user_question_types_text_and_clears(
+    tmp_db_path: str,
+) -> None:
+    """A non-numeric reply during a pending question goes verbatim into
+    CC's 'Other' field, then clears the pending state."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    reg.set_pending_question("s1", [{"label": "A"}, {"label": "B"}])
+    matrix = FakeMatrixIO()
+    actuator = FakeActuator()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=actuator)
+    await worker.start()
+    await worker.enqueue(
+        {"kind": "matrix_reply", "text": "I want a fourth option", "msg_ts": "$M2"}
+    )
+    await worker.stop()
+
+    assert actuator.key_deliveries == []
+    assert actuator.deliveries == [("main", "13", "I want a fourth option")]
+    assert reg.get_pending_question("s1") is None
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_numeric_reply_without_pending_question_types_normally(
+    tmp_db_path: str,
+) -> None:
+    """When no question is pending, '1' should NOT navigate — it should
+    just be typed (so it works for permission prompts as before)."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIO()
+    actuator = FakeActuator()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=actuator)
+    await worker.start()
+    await worker.enqueue({"kind": "matrix_reply", "text": "1", "msg_ts": "$M3"})
+    await worker.stop()
+
+    assert actuator.key_deliveries == []
+    assert actuator.deliveries == [("main", "13", "1")]
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_ask_user_question_notification_stores_pending_question(
+    tmp_db_path: str,
+) -> None:
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    await worker.enqueue(
+        {
+            "kind": "notification",
+            "message": "Claude needs your permission",
+            "tool_request": (
+                'AskUserQuestion({"questions":[{"question":"Pick","options":'
+                '[{"label":"A"},{"label":"B"}]}]})'
+            ),
+        }
+    )
+    await worker.stop()
+
+    pending = reg.get_pending_question("s1")
+    assert pending is not None
+    assert [o["label"] for o in pending["options"]] == ["A", "B"]
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_response_event_clears_pending_question(tmp_db_path: str) -> None:
+    """A new assistant response means CC moved past the question; stale
+    pending_question state should be wiped so a later numeric reply isn't
+    misinterpreted."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    reg.set_pending_question("s1", [{"label": "A"}, {"label": "B"}])
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    await worker.enqueue(
+        {"kind": "response", "uuid": "u1", "parentUuid": None, "text": "answer recorded"}
+    )
+    await worker.stop()
+    assert reg.get_pending_question("s1") is None
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_option_reply_suppresses_label_echo_in_subsequent_prompt(
+    tmp_db_path: str,
+) -> None:
+    """Replying '2' to AskUserQuestion → CC records the selected option's
+    LABEL as the user prompt. The worker pre-stages that label in the echo
+    set so the prompt event the transcript reader subsequently emits gets
+    suppressed (no duplicate 👤 mirror)."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    reg.set_pending_question(
+        "s1",
+        [
+            {"label": "Per-key RGB Matrix", "description": ""},
+            {"label": "Underglow only", "description": ""},
+        ],
+    )
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    # User picks option 2 via Matrix.
+    await worker.enqueue({"kind": "matrix_reply", "text": "2", "msg_ts": "$M1"})
+    # CC's transcript reader subsequently emits a prompt event with the
+    # selected option's label (because that's what CC recorded).
+    await worker.enqueue(
+        {"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "Underglow only"}
+    )
+    await worker.stop()
+    # The option-label prompt was suppressed — no 👤 mirror back to Matrix.
+    assert matrix.posts == []
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_mirror_marks_thread_fresh_with_yellow_marker(
+    tmp_db_path: str, monkeypatch
+) -> None:
+    """A mirrored response edits the top-level to 🟡 once, and schedules a
+    revert. Subsequent mirrors within the window reset the timer without
+    re-editing (no edit storm during a burst)."""
+    import slackbot.worker as worker_mod
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    # Disable the scheduled revert sleep — we only care about the mark side.
+    monkeypatch.setattr(worker_mod, "_RECENT_MARKER_SECONDS", 0.01)
+    await worker.start()
+    await worker.enqueue({"kind": "response", "uuid": "r1", "parentUuid": "u1", "text": "first"})
+    await worker.enqueue({"kind": "response", "uuid": "r2", "parentUuid": "u1", "text": "second"})
+    await worker.enqueue({"kind": "response", "uuid": "r3", "parentUuid": "u1", "text": "third"})
+    await worker._queue.join()
+    # Three responses mirrored — but only one mark edit (🆕), because each
+    # subsequent mirror saw _fresh=True and only reset the timer.
+    fresh_edits = [e for e in matrix.edits if "🆕" in e[1]]
+    assert len(fresh_edits) == 1
+    # Both edits keep the leading 🟢 — the marker is a trailing suffix
+    # so the colour doesn't flicker in Element's room list.
+    assert all(e[1].startswith("🟢 ") for e in matrix.edits)
+    # Wait long enough for the revert task to fire (using the shortened delay).
+    await asyncio.sleep(0.1)
+    revert_edits = [e for e in matrix.edits if "🆕" not in e[1]]
+    assert len(revert_edits) >= 1
+    await worker.stop()
+    reg.close()
+
+
+@dataclass
+class FakeMatrixIOWithUserClient(FakeMatrixIO):
+    posts_with_flag: list[tuple[str, str, bool]] = field(default_factory=list)
+
+    def has_user_client(self) -> bool:
+        return True
+
+    async def post_in_thread(self, thread_root, text, room_id=None, as_user=False):
+        self.posts.append((thread_root, text))
+        self.posts_with_flag.append((thread_root, text, as_user))
+        self._seq += 1
+        return f"$thr.{self._seq}"
+
+
+@pytest.mark.asyncio
+async def test_prompts_post_as_user_without_prefix_when_user_client_present(
+    tmp_db_path: str,
+) -> None:
+    """With a user_client wired, the bot routes 👤 mirrors via the user
+    account and drops the '[Claude] 👤 ' prefix — Element shows the
+    user's avatar/name inline so the label is redundant."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIOWithUserClient()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    await worker.enqueue(
+        {"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "hi there"}
+    )
+    await worker.stop()
+    # No prefix; posted via the user path.
+    assert matrix.posts_with_flag == [("$TOP1:server", "hi there", True)]
+
+
+@pytest.mark.asyncio
+async def test_responses_still_post_as_bot_even_with_user_client(tmp_db_path: str) -> None:
+    """Bot output (🤖 responses, notifications, errors) always posts under
+    the bot account — only 👤 mirrors get routed through the user puppet."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIOWithUserClient()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    await worker.enqueue(
+        {"kind": "response", "uuid": "r1", "parentUuid": "u1", "text": "answer"}
+    )
+    await worker.stop()
+    # Bot path: as_user is False.
+    matching = [p for p in matrix.posts_with_flag if p[1].startswith("[Claude] 🤖")]
+    assert len(matching) == 1
+    assert matching[0][2] is False
