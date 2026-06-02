@@ -2,6 +2,15 @@
 
 Bridge between Claude Code, Codex, and Gemini CLI sessions and Matrix: mirrors selected agent sessions into Matrix threads, and types your Matrix replies back into the originating Zellij pane.
 
+> **Primary branch: `ai-zellij-session`.** This is the canonical / main
+> usage branch going forward — it carries the dedicated-`ai`-zellij-session
+> behaviour (`/new` and `/resume` spawn agent panes into the `ai` session,
+> never the human's `main`) plus the `zellij-ai` systemd bootstrap. It is
+> intentionally **not merged into `main`**; treat this branch as the source
+> of truth. The deployed systemd unit still runs from the `main` checkout,
+> so switching the running daemon over means pointing it at this branch
+> (or merging) — deferred by choice, not pending work.
+
 > Migrated from Slack to Matrix on the `matrix-port` branch. The repo name (`claude-slack-bot`) and Python package (`slackbot`) are unchanged from the Slack era; the transport underneath them is now Matrix.
 
 ## What this does
