@@ -61,9 +61,17 @@ chmod 600 ~/.config/claude-slack-bot/env
 
 ### 3. Install the daemon
 
+The systemd unit is host-agnostic: it runs from a stable symlink
+(`~/.local/share/claude-slack-bot/app`) so the same unit works regardless
+of where the repo is cloned (see "Multi-host deployment" below). Run these
+from inside your checkout — wherever it lives:
+
 ```bash
-cd ~/git/Private/AI-slack-conversation
+cd "$(git rev-parse --show-toplevel)"   # your checkout
 uv venv && uv sync
+# Point the stable symlink at this checkout:
+mkdir -p ~/.local/share/claude-slack-bot
+ln -sfn "$PWD" ~/.local/share/claude-slack-bot/app
 mkdir -p ~/.config/systemd/user
 cp systemd/claude-slack-bot.service ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -76,9 +84,10 @@ Expected status: `active (running)`.
 ### 4. Install the agent hooks
 
 ```bash
-bash ~/git/Private/AI-slack-conversation/hooks/install.sh
-bash ~/git/Private/AI-slack-conversation/hooks/install-codex.sh
-bash ~/git/Private/AI-slack-conversation/hooks/install-gemini.sh
+cd "$(git rev-parse --show-toplevel)"
+bash hooks/install.sh
+bash hooks/install-codex.sh
+bash hooks/install-gemini.sh
 ```
 
 This installs the bridge hooks for Claude, Codex, and Gemini:
@@ -104,7 +113,7 @@ Install **Element X** on Android (or iOS). Log in as your human user against `ch
 ## Testing
 
 ```bash
-cd ~/git/Private/AI-slack-conversation
+cd "$(git rev-parse --show-toplevel)"
 uv run pytest -v
 uv run ruff check . && uv run ruff format --check .
 shellcheck hooks/*.sh
@@ -144,6 +153,22 @@ Then in Element X: reply to the thread; verify text appears typed into Zellij pa
 ```bash
 journalctl --user -u claude-slack-bot -f
 ```
+
+### Multi-host deployment
+
+The bot can run on more than one machine whose clone lives at a different
+path. To keep a single tracked systemd unit working everywhere, the unit
+references a per-host symlink rather than a hard-coded checkout path:
+
+```
+~/.local/share/claude-slack-bot/app  ->  <this host's checkout>
+```
+
+Each host creates that symlink once (step 3 of Install). The tracked
+`systemd/claude-slack-bot.service` is then identical on every host — no
+per-host edits, no path-fix commits that break the other machine on the
+next `git pull`. To move the daemon to a different checkout on a host,
+re-point the symlink and `systemctl --user restart claude-slack-bot`.
 
 ## Implemented features
 
