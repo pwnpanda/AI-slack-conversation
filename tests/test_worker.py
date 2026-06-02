@@ -17,12 +17,15 @@ class FakeMatrixIO:
     def room_for_agent(self, agent: str) -> str:
         return f"!{agent}:server"
 
-    async def post_in_thread(self, thread_root, text, room_id=None):
+    def has_user_client(self) -> bool:
+        return False
+
+    async def post_in_thread(self, thread_root, text, room_id=None, as_user=False):
         self.posts.append((thread_root, text))
         self._seq += 1
         return f"$thr.{self._seq}"
 
-    async def post_top_level(self, text, room_id=None):
+    async def post_top_level(self, text, room_id=None, as_user=False):
         self.top_level_posts.append(text)
         self._seq += 1
         return f"$top.{self._seq}"
@@ -526,3 +529,62 @@ async def test_mirror_marks_thread_fresh_with_yellow_marker(
     assert len(revert_edits) >= 1
     await worker.stop()
     reg.close()
+
+
+@dataclass
+class FakeMatrixIOWithUserClient(FakeMatrixIO):
+    posts_with_flag: list[tuple[str, str, bool]] = field(default_factory=list)
+
+    def has_user_client(self) -> bool:
+        return True
+
+    async def post_in_thread(self, thread_root, text, room_id=None, as_user=False):
+        self.posts.append((thread_root, text))
+        self.posts_with_flag.append((thread_root, text, as_user))
+        self._seq += 1
+        return f"$thr.{self._seq}"
+
+
+@pytest.mark.asyncio
+async def test_prompts_post_as_user_without_prefix_when_user_client_present(
+    tmp_db_path: str,
+) -> None:
+    """With a user_client wired, the bot routes 👤 mirrors via the user
+    account and drops the '[Claude] 👤 ' prefix — Element shows the
+    user's avatar/name inline so the label is redundant."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIOWithUserClient()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    await worker.enqueue(
+        {"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "hi there"}
+    )
+    await worker.stop()
+    # No prefix; posted via the user path.
+    assert matrix.posts_with_flag == [("$TOP1:server", "hi there", True)]
+
+
+@pytest.mark.asyncio
+async def test_responses_still_post_as_bot_even_with_user_client(tmp_db_path: str) -> None:
+    """Bot output (🤖 responses, notifications, errors) always posts under
+    the bot account — only 👤 mirrors get routed through the user puppet."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    _bound_session(reg, "s1")
+    matrix = FakeMatrixIOWithUserClient()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+    await worker.enqueue(
+        {"kind": "response", "uuid": "r1", "parentUuid": "u1", "text": "answer"}
+    )
+    await worker.stop()
+    # Bot path: as_user is False.
+    matching = [p for p in matrix.posts_with_flag if p[1].startswith("[Claude] 🤖")]
+    assert len(matching) == 1
+    assert matching[0][2] is False

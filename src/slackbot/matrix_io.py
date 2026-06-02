@@ -8,6 +8,7 @@ mirror what the rest of the daemon expects so the call sites stay flat.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import markdown
@@ -62,17 +63,33 @@ def _emoji_for(name: str) -> str:
 
 
 class MatrixIO:
-    """Post, edit, and react in Matrix rooms via nio.AsyncClient."""
+    """Post, edit, and react in Matrix rooms via nio.AsyncClient.
+
+    Optionally holds a SECOND client logged in as the human user, used
+    for 👤-mirroring CC-typed prompts so Element shows them under the
+    user's own avatar/displayname instead of the bot's. When the user
+    client posts, the resulting event_id is reported via on_self_post
+    so the daemon's on_room_message dedupe set can ignore the echo
+    delivered back through sync (otherwise the bot would route its own
+    post to the actuator and the typed text would loop into the pane).
+    """
 
     def __init__(
         self,
         client: Any,
         room_id: str,
         agent_rooms: dict[str, str] | None = None,
+        user_client: Any | None = None,
+        on_self_post: Callable[[str], None] | None = None,
     ) -> None:
         self._client = client
         self._room_id = room_id
         self._agent_rooms = agent_rooms or {}
+        self._user_client = user_client
+        self._on_self_post = on_self_post
+
+    def has_user_client(self) -> bool:
+        return self._user_client is not None
 
     def room_for_agent(self, agent: str) -> str:
         return self._agent_rooms.get(agent.lower(), self._room_id)
@@ -80,21 +97,42 @@ class MatrixIO:
     def _room_or_default(self, room_id: str | None) -> str:
         return room_id or self._room_id
 
-    async def post_top_level(self, text: str, room_id: str | None = None) -> str:
+    def _client_for(self, as_user: bool) -> Any:
+        if as_user and self._user_client is not None:
+            return self._user_client
+        return self._client
+
+    def _record_self_post(self, event_id: str, as_user: bool) -> None:
+        if as_user and self._on_self_post is not None:
+            self._on_self_post(event_id)
+
+    async def post_top_level(
+        self, text: str, room_id: str | None = None, as_user: bool = False
+    ) -> str:
         target = self._room_or_default(room_id)
-        resp = await self._client.room_send(
+        resp = await self._client_for(as_user).room_send(
             room_id=target,
             message_type="m.room.message",
             content=_text_content(text),
         )
+        self._record_self_post(str(resp.event_id), as_user)
         return str(resp.event_id)
 
-    async def post_in_thread(self, thread_root: str, text: str, room_id: str | None = None) -> str:
+    async def post_in_thread(
+        self,
+        thread_root: str,
+        text: str,
+        room_id: str | None = None,
+        as_user: bool = False,
+    ) -> str:
         """Post text as a threaded reply to the root event thread_root.
 
         Sends both the m.thread relation (for spec-compliant clients) and
         the m.in_reply_to / is_falling_back fields so clients that do not
         understand threads still render the message as a reply.
+
+        When as_user=True and a user_client is configured, posts from the
+        human's account instead of the bot's.
         """
         target = self._room_or_default(room_id)
         content = _text_content(
@@ -108,11 +146,12 @@ class MatrixIO:
                 }
             },
         )
-        resp = await self._client.room_send(
+        resp = await self._client_for(as_user).room_send(
             room_id=target,
             message_type="m.room.message",
             content=content,
         )
+        self._record_self_post(str(resp.event_id), as_user)
         return str(resp.event_id)
 
     async def edit_top_level(self, ts: str, text: str, room_id: str | None = None) -> None:

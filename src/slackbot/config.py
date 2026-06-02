@@ -19,6 +19,12 @@ class Config:
     port: int
     db_path: str
     log_level: str
+    # Optional second account for posting CC-typed user prompts under the
+    # human's identity instead of the bot's. When both env vars are set,
+    # the bot logs in twice and routes 👤 mirrors through this account so
+    # Element shows them as the user's own messages.
+    matrix_user_user_id: str | None = None
+    matrix_user_access_token: str | None = None
     # /new <name> spawns a CC pane in this zellij session and types "/rn <name>"
     # into it after a short delay. Override via env when zellij session differs.
     new_pane_zellij_session: str = "main"
@@ -71,4 +77,6 @@ def load_config() -> Config:
         new_pane_zellij_session=os.environ.get("SLACKBOT_NEW_PANE_ZELLIJ_SESSION", "main"),
         new_pane_command=_new_pane_command(),
         new_pane_delay_seconds=float(os.environ.get("SLACKBOT_NEW_PANE_DELAY_SECONDS", "5")),
+        matrix_user_user_id=os.environ.get("MATRIX_USER_USER_ID") or None,
+        matrix_user_access_token=os.environ.get("MATRIX_USER_ACCESS_TOKEN") or None,
     )

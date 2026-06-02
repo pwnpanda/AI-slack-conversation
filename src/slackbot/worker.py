@@ -60,9 +60,16 @@ def _echo_key(text: str) -> str:
 
 class _MatrixIOProto(Protocol):
     def room_for_agent(self, agent: str) -> str: ...
-    async def post_top_level(self, text: str, room_id: str | None = None) -> str: ...
+    def has_user_client(self) -> bool: ...
+    async def post_top_level(
+        self, text: str, room_id: str | None = None, as_user: bool = False
+    ) -> str: ...
     async def post_in_thread(
-        self, thread_root: str, text: str, room_id: str | None = None
+        self,
+        thread_root: str,
+        text: str,
+        room_id: str | None = None,
+        as_user: bool = False,
     ) -> str: ...
     async def edit_top_level(self, ts: str, text: str, room_id: str | None = None) -> None: ...
     async def react(self, ts: str, emoji: str, room_id: str | None = None) -> None: ...
@@ -283,10 +290,23 @@ class Worker:
             # Buffer for replay when /rn or auto-recovery binds the thread.
             self._reg.buffer_event(self._sid, kind, json.dumps({**data, "agent": sess.agent}))
             return
-        text = format_event(kind, {**data, "agent": sess.agent})
+        # Prompts originate from the human; if a user-puppet client is wired
+        # up, post them under the user's identity with no '[Claude] 👤'
+        # prefix — Element shows the user's avatar/displayname inline so
+        # the agent-label is redundant and the human-outline emoji is
+        # double-redundant. Bot output (responses, errors, notifications)
+        # keeps its prefix and posts as the bot account.
+        as_user = kind == "prompt" and self._matrix.has_user_client()
+        if as_user:
+            text = str(data.get("text", ""))
+        else:
+            text = format_event(kind, {**data, "agent": sess.agent})
         for chunk in chunk_for_matrix(text):
             await self._matrix.post_in_thread(
-                sess.matrix_thread_root, chunk, room_id=sess.matrix_room_id
+                sess.matrix_thread_root,
+                chunk,
+                room_id=sess.matrix_room_id,
+                as_user=as_user,
             )
         if uuid:
             self._remember_uuid(uuid)

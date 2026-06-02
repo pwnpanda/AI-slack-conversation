@@ -21,13 +21,20 @@ class FakeMatrixIO:
     def room_for_agent(self, agent: str) -> str:
         return f"!{agent}:server"
 
-    async def post_top_level(self, text: str, room_id: str | None = None) -> str:
+    def has_user_client(self) -> bool:
+        return False
+
+    async def post_top_level(
+        self, text: str, room_id: str | None = None, as_user: bool = False
+    ) -> str:
         self.top_level_posts.append(text)
         self.top_level_rooms.append(room_id)
         self._seq += 1
         return f"$top.{self._seq}"
 
-    async def post_in_thread(self, thread_root: str, text: str, room_id: str | None = None) -> str:
+    async def post_in_thread(
+        self, thread_root: str, text: str, room_id: str | None = None, as_user: bool = False
+    ) -> str:
         self.thread_posts.append((thread_root, text))
         self.thread_rooms.append(room_id)
         self._seq += 1
