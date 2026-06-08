@@ -259,6 +259,7 @@ the last pre-migration commit on `main`.
 
 | Session | Summary | Date |
 |---------|---------|------|
+| `matrix-thread-replies` | Fixed direct prompt/response hook fallback so Codex assistant replies mirror into the bound Matrix thread when transcript tailing is unavailable. | 2026-06-08 |
 | `obsidian-publish-rule` | Added a global `ExitPlanMode` hook that publishes plans to Obsidian `for_evaluation/<project>/` for mobile review, plus `reconcile_plans.py` for manual copy-back, and a CLAUDE.md rule. Source lives in `homelabs/Obsidian/plan-review/`, symlinked into `~/.claude/hooks/`. | 2026-05-30 |
 | `matrix-port` | Ported the daemon from Slack to Matrix (matrix-nio): replaced `slack_io`/`slack_poller`/`slack_commands`, renamed registry schema, rewrote `__main__` around `sync_forever`. | 2026-05-29 |
 | `debug-gemini-routing` | Fixed `rn` blocking for Gemini and verified Slack reply routing via trace logs. | 2026-05-25 |
