@@ -177,13 +177,30 @@ class EventHandlers:
         )
 
     async def _on_prompt(self, ev: dict[str, Any]) -> None:
-        # Legacy hook. Transcript reader is the real source for prompt mirroring.
-        # We still accept the event to refresh runtime fields (cc_pid, pane id).
-        self._refresh_runtime(ev["session_id"], ev)
+        sid = ev["session_id"]
+        # Transcript reader is preferred because it carries stable uuids for
+        # dedupe. Direct hook events remain the fallback for agents/sessions
+        # that do not expose a transcript_path.
+        self._refresh_runtime(sid, ev)
+        sess = self._reg.get_session(sid)
+        if sess is None or sess.transcript_path:
+            return
+        worker = await self._sup.get_or_create(sid)
+        await worker.enqueue({"kind": "prompt", "text": ev.get("text", "")})
 
     async def _on_response(self, ev: dict[str, Any]) -> None:
-        # Same rationale as _on_prompt — transcript reader does the mirroring.
-        self._refresh_runtime(ev["session_id"], ev)
+        sid = ev["session_id"]
+        # Same fallback as _on_prompt. When transcript tailing is unavailable,
+        # Stop-hook response events are the only assistant output source.
+        self._refresh_runtime(sid, ev)
+        sess = self._reg.get_session(sid)
+        if sess is None or sess.transcript_path:
+            return
+        text = ev.get("text", "")
+        if not text:
+            return
+        worker = await self._sup.get_or_create(sid)
+        await worker.enqueue({"kind": "response", "text": text})
 
     async def _on_error(self, ev: dict[str, Any]) -> None:
         sid = ev["session_id"]
