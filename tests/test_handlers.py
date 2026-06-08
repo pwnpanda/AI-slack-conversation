@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass, field
 
 import pytest
@@ -175,11 +176,45 @@ async def test_notification_enqueues_into_worker(
     await h.handle({"kind": "name", "session_id": "s1", "name": "myproj"})
     await h.handle({"kind": "notification", "session_id": "s1", "message": "needs input"})
     # Give worker a tick to drain
-    import asyncio
-
     await asyncio.sleep(0.05)
     # The notification message should have been posted into the thread
     assert any("needs input" in t for _, t in shared_matrix.thread_posts)
+    await sup.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_direct_prompt_and_response_mirror_without_transcript(
+    reg: Registry, sup: Supervisor, shared_matrix: FakeMatrixIO
+) -> None:
+    h = EventHandlers(reg, sup, shared_matrix)
+    await h.handle(_start(agent="codex"))
+    sess = reg.get_session("s1")
+    assert sess is not None and sess.matrix_thread_root is not None
+
+    await h.handle({"kind": "prompt", "session_id": "s1", "text": "hi"})
+    await h.handle({"kind": "response", "session_id": "s1", "text": "hello back"})
+
+    await asyncio.sleep(0.05)
+    assert (sess.matrix_thread_root, "[Codex] 👤 hi") in shared_matrix.thread_posts
+    assert (sess.matrix_thread_root, "[Codex] 🤖 hello back") in shared_matrix.thread_posts
+    await sup.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_direct_response_does_not_duplicate_transcript_backed_session(
+    reg: Registry, sup: Supervisor, shared_matrix: FakeMatrixIO, tmp_path
+) -> None:
+    transcript = tmp_path / "tx.jsonl"
+    transcript.write_text("")
+    h = EventHandlers(reg, sup, shared_matrix)
+    await h.handle(_start(agent="codex") | {"transcript_path": str(transcript)})
+    sess = reg.get_session("s1")
+    assert sess is not None and sess.matrix_thread_root is not None
+
+    await h.handle({"kind": "response", "session_id": "s1", "text": "hello back"})
+
+    await asyncio.sleep(0.05)
+    assert shared_matrix.thread_posts == []
     await sup.shutdown()
 
 
@@ -227,3 +262,4 @@ async def test_event_after_ended_self_heals_status_and_reattaches_reader(
     )
     assert reg.get_session("s1").status == "active"
     assert "s1" in sup._readers
+    await sup.shutdown()
