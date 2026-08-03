@@ -37,9 +37,10 @@ cc_pid="$PPID"
 payload="$(jq -n \
   --arg sid "$sid" --arg agent "$agent" --arg t "$last_text" \
   --arg zs "${ZELLIJ_SESSION_NAME:-}" --arg zp "${ZELLIJ_PANE_ID:-}" \
+  --arg tx "$transcript" \
   --argjson cc_pid "$cc_pid" \
   '{v:1,kind:"response",session_id:$sid,agent:$agent,text:$t,
-    zellij_session:$zs,zellij_pane_id:$zp,cc_pid:$cc_pid}')"
+    zellij_session:$zs,zellij_pane_id:$zp,transcript_path:$tx,cc_pid:$cc_pid}')"
 curl -fsS --max-time 1 -H 'content-type: application/json' \
   -d "$payload" "http://127.0.0.1:${PORT}/event" >/dev/null 2>&1 || true
 printf '{}\n'
