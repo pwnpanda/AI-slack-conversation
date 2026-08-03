@@ -177,30 +177,30 @@ class EventHandlers:
         )
 
     async def _on_prompt(self, ev: dict[str, Any]) -> None:
-        sid = ev["session_id"]
-        # Transcript reader is preferred because it carries stable uuids for
-        # dedupe. Direct hook events remain the fallback for agents/sessions
-        # that do not expose a transcript_path.
-        self._refresh_runtime(sid, ev)
-        sess = self._reg.get_session(sid)
-        if sess is None or sess.transcript_path:
-            return
-        worker = await self._sup.get_or_create(sid)
-        await worker.enqueue({"kind": "prompt", "text": ev.get("text", "")})
+        await self._mirror_hook_text(ev, "prompt")
 
     async def _on_response(self, ev: dict[str, Any]) -> None:
+        await self._mirror_hook_text(ev, "response")
+
+    async def _mirror_hook_text(self, ev: dict[str, Any], kind: str) -> None:
+        """Mirror text carried by the hook itself, for agents with no transcript.
+
+        Claude and Codex both write a transcript that the reader mirrors, so
+        this is the fallback for a session we cannot tail. Both conditions
+        matter: `transcript_path` can be stale-NULL on a row auto-created by a
+        hook payload, and an attached reader means the same text is already on
+        its way to Matrix — mirroring here too posts it twice.
+        """
         sid = ev["session_id"]
-        # Same fallback as _on_prompt. When transcript tailing is unavailable,
-        # Stop-hook response events are the only assistant output source.
         self._refresh_runtime(sid, ev)
         sess = self._reg.get_session(sid)
-        if sess is None or sess.transcript_path:
+        text = str(ev.get("text", ""))
+        if sess is None or not text:
             return
-        text = ev.get("text", "")
-        if not text:
+        if sess.transcript_path or self._sup.has_reader(sid):
             return
         worker = await self._sup.get_or_create(sid)
-        await worker.enqueue({"kind": "response", "text": text})
+        await worker.enqueue({"kind": kind, "text": text})
 
     async def _on_error(self, ev: dict[str, Any]) -> None:
         sid = ev["session_id"]
@@ -231,6 +231,14 @@ class EventHandlers:
             log.info("auto-created session row for unknown sid %s (agent=%s)", sid, agent)
             if sess is None:
                 return
+        # Back-fill the transcript path from any hook that carries one. A row
+        # created from a payload that omitted it would otherwise never get a
+        # reader, leaving the hook-text fallback mirroring a session we can
+        # tail properly — and posting each prompt twice once one does attach.
+        new_transcript = ev.get("transcript_path")
+        if new_transcript and not sess.transcript_path:
+            self._reg.set_transcript_path(sid, new_transcript)
+            sess = self._reg.get_session(sid) or sess
         cc_pid = _int_or_none(ev.get("cc_pid"))
         self._reg.refresh_liveness(
             sid,
@@ -304,7 +312,9 @@ def _auto_name(agent: str, cwd: str, sid: str) -> str:
 
 
 def _int_or_none(value: object) -> int | None:
+    if not isinstance(value, str | bytes | int | float):
+        return None
     try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
+        return int(value)
+    except (OverflowError, TypeError, ValueError):
         return None

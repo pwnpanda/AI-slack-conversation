@@ -263,3 +263,63 @@ async def test_event_after_ended_self_heals_status_and_reattaches_reader(
     assert reg.get_session("s1").status == "active"
     assert "s1" in sup._readers
     await sup.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hook_text_not_mirrored_while_transcript_reader_attached(
+    reg: Registry, sup: Supervisor, shared_matrix: FakeMatrixIO, tmp_path
+) -> None:
+    """A stale NULL transcript_path must not re-enable the hook-text fallback.
+
+    prompt.sh/stop.sh payloads can reach a session row that was auto-created
+    without a transcript_path. The attached reader is the real signal that
+    something else already mirrors this text; mirroring it here too posts the
+    same prompt twice.
+    """
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("")
+    h = EventHandlers(reg, sup, shared_matrix)
+    await h.handle(_start() | {"transcript_path": str(transcript)})
+    await h.handle({"kind": "name", "session_id": "s1", "name": "myproj"})
+    assert sup.has_reader("s1")
+    # Simulate the row having been created by a hook that carried no path.
+    reg._c().execute("UPDATE sessions SET transcript_path=NULL WHERE cc_session_id='s1'")
+
+    await h.handle({"kind": "prompt", "session_id": "s1", "text": "hello"})
+    await h.handle({"kind": "response", "session_id": "s1", "text": "hi"})
+    await asyncio.sleep(0.05)
+
+    assert shared_matrix.thread_posts == []
+    await sup.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_prompt_hook_backfills_transcript_path_and_attaches_reader(
+    reg: Registry, sup: Supervisor, shared_matrix: FakeMatrixIO, tmp_path
+) -> None:
+    """A row auto-created from a payload that carried no transcript_path must
+    pick one up from a later hook, otherwise the reader never attaches and the
+    hook-text fallback keeps mirroring a session we could tail properly."""
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("")
+    h = EventHandlers(reg, sup, shared_matrix)
+    # Row exists but predates any payload that carried a transcript path.
+    await h.handle(_start())
+    assert reg.get_session("s1").transcript_path is None
+    assert not sup.has_reader("s1")
+
+    await h.handle(
+        {
+            "kind": "prompt",
+            "session_id": "s1",
+            "text": "hello",
+            "cwd": "/x",
+            "transcript_path": str(transcript),
+        }
+    )
+    await asyncio.sleep(0.05)
+
+    assert reg.get_session("s1").transcript_path == str(transcript)
+    assert sup.has_reader("s1")
+    assert shared_matrix.thread_posts == []
+    await sup.shutdown()

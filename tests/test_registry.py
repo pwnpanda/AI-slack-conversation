@@ -287,3 +287,43 @@ def test_open_drops_pre_matrix_schema(tmp_db_path: str) -> None:
     assert "matrix_thread_root" in cols
     assert "slack_channel" not in cols
     reg.close()
+
+
+def test_meta_roundtrip_and_default(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    assert reg.get_meta("matrix_sync_token") is None
+    reg.set_meta("matrix_sync_token", "s_123")
+    assert reg.get_meta("matrix_sync_token") == "s_123"
+    reg.set_meta("matrix_sync_token", "s_456")
+    assert reg.get_meta("matrix_sync_token") == "s_456"
+    reg.close()
+
+
+def test_meta_survives_reopen(tmp_db_path: str) -> None:
+    """The sync cursor is only useful if it outlives the daemon that wrote it."""
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.set_meta("matrix_sync_token", "s_persisted")
+    reg.close()
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    assert reg.get_meta("matrix_sync_token") == "s_persisted"
+    reg.close()
+
+
+def test_meta_table_added_to_preexisting_db(tmp_db_path: str) -> None:
+    """Existing deployments already have a sessions/event_log DB with no meta
+    table; opening must add it rather than fail."""
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg._c().execute("DROP TABLE meta")
+    reg.close()
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    assert reg.get_meta("anything") is None
+    reg.set_meta("anything", "ok")
+    assert reg.get_meta("anything") == "ok"
+    reg.close()

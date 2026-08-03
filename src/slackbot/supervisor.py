@@ -63,6 +63,10 @@ class Supervisor:
         reader.open()
         self._readers[sid] = reader
 
+    def has_reader(self, sid: str) -> bool:
+        """True when a TranscriptReader is already mirroring *sid*."""
+        return sid in self._readers
+
     def detach_reader(self, sid: str) -> None:
         """Close and remove the TranscriptReader for *sid*."""
         reader = self._readers.pop(sid, None)
