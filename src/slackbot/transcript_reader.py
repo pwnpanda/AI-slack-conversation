@@ -16,13 +16,17 @@ log = logging.getLogger(__name__)
 
 
 def _extract_text(content: Any) -> str:
-    """CC stores message.content as either a plain string or an array of blocks."""
+    """Extract text from Claude and Codex message content."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         parts: list[str] = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
+            if isinstance(block, dict) and block.get("type") in {
+                "input_text",
+                "output_text",
+                "text",
+            }:
                 t = block.get("text")
                 if isinstance(t, str):
                     parts.append(t)
@@ -139,6 +143,22 @@ class TranscriptReader:
 
     def _record_to_event(self, rec: dict[str, Any]) -> dict[str, Any] | None:
         rtype = rec.get("type")
+        if rtype == "response_item":
+            payload = rec.get("payload")
+            if not isinstance(payload, dict) or payload.get("type") != "message":
+                return None
+            role = payload.get("role")
+            if role not in {"user", "assistant"}:
+                return None
+            text = _extract_text(payload.get("content"))
+            if not text:
+                return None
+            return {
+                "kind": "prompt" if role == "user" else "response",
+                "uuid": payload.get("id"),
+                "parentUuid": None,
+                "text": text,
+            }
         uuid = rec.get("uuid")
         parent = rec.get("parentUuid")
         msg = rec.get("message")
