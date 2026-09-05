@@ -367,3 +367,39 @@ def test_repoint_active_sessions_skips_ended_and_already_correct(tmp_db_path: st
     assert live is not None
     assert live.matrix_thread_root == "$keep:srv"  # untouched, no needless re-thread
     reg.close()
+
+
+def test_upsert_drops_thread_root_when_room_changes(tmp_db_path: str) -> None:
+    """A root only exists in the room it was posted to. Re-registering a
+    session into a different room must drop it, or every later message relates
+    to a root the new room has never seen and no client can render the thread."""
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("s", "/x", "ai", "1", agent="claude", matrix_room_id="!claude:srv")
+    reg.set_name("s", "ftp")
+    reg.set_matrix_thread_root("s", "$root:srv")
+
+    reg.upsert_session("s", "/x", "ai", "1", agent="claude", matrix_room_id="!host:srv")
+
+    sess = reg.get_session("s")
+    assert sess is not None
+    assert sess.matrix_room_id == "!host:srv"
+    assert sess.matrix_thread_root is None
+    assert sess.name == "ftp"
+    reg.close()
+
+
+def test_upsert_keeps_thread_root_when_room_is_unchanged(tmp_db_path: str) -> None:
+    """The common case: a session re-registers into the same room and must keep
+    its thread, otherwise every restart would fork a new top-level."""
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("s", "/x", "ai", "1", agent="claude", matrix_room_id="!host:srv")
+    reg.set_matrix_thread_root("s", "$root:srv")
+
+    reg.upsert_session("s", "/x", "ai", "2", agent="claude", matrix_room_id="!host:srv")
+
+    sess = reg.get_session("s")
+    assert sess is not None
+    assert sess.matrix_thread_root == "$root:srv"
+    reg.close()

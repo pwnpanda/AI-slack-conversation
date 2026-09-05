@@ -173,6 +173,15 @@ class Registry:
               cwd = excluded.cwd,
               zellij_session = excluded.zellij_session,
               zellij_pane_id = excluded.zellij_pane_id,
+              -- A thread root only exists in the room it was posted to, so a
+              -- session that changes rooms (e.g. when per-host routing starts)
+              -- must drop it. Keeping it would relate every later message to a
+              -- root the new room has never seen: the events arrive, but no
+              -- client can render a thread whose root is missing.
+              matrix_thread_root = CASE
+                WHEN sessions.matrix_room_id IS NOT excluded.matrix_room_id THEN NULL
+                ELSE sessions.matrix_thread_root
+              END,
               matrix_room_id = excluded.matrix_room_id,
               cc_pid = COALESCE(excluded.cc_pid, sessions.cc_pid),
               transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path),
