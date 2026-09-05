@@ -116,7 +116,7 @@ async def test_name_event_posts_top_level(reg: Registry, sup: Supervisor) -> Non
     h = EventHandlers(reg, sup, matrix)
     await h.handle(_start())
     await h.handle({"kind": "name", "session_id": "s1", "name": "myproj"})
-    assert matrix.top_level_posts == ["🟢 [Claude] myproj  ·  /x"]
+    assert matrix.top_level_posts == ["🟢 Claude: myproj  ·  /x"]
     sess = reg.get_session("s1")
     assert sess is not None and sess.name == "myproj"
     assert sess.matrix_thread_root is not None

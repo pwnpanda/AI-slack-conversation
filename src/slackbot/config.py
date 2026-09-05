@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,13 @@ class Config:
     port: int
     db_path: str
     log_level: str
+    # Per-host routing: when true (default) the daemon resolves a single
+    # Matrix room named after this machine's hostname (creating it if
+    # absent) and routes ALL providers on this host into it — so work vs
+    # private is separated by machine, and adding/removing a daemon host
+    # needs no manual room wiring. When true, agent_rooms is ignored.
+    room_by_hostname: bool = True
+    hostname: str = ""
     # Optional second account for posting CC-typed user prompts under the
     # human's identity instead of the bot's. When both env vars are set,
     # the bot logs in twice and routes 👤 mirrors through this account so
@@ -79,4 +87,6 @@ def load_config() -> Config:
         new_pane_delay_seconds=float(os.environ.get("SLACKBOT_NEW_PANE_DELAY_SECONDS", "5")),
         matrix_user_user_id=os.environ.get("MATRIX_USER_USER_ID") or None,
         matrix_user_access_token=os.environ.get("MATRIX_USER_ACCESS_TOKEN") or None,
+        room_by_hostname=os.environ.get("SLACKBOT_ROOM_BY_HOSTNAME", "1") not in ("0", "false", ""),
+        hostname=os.environ.get("SLACKBOT_HOSTNAME") or socket.gethostname(),
     )

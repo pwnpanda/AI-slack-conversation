@@ -3,13 +3,13 @@ from slackbot.events import format_event, parse_rn_command, top_level_text
 
 def test_top_level_text_active() -> None:
     assert top_level_text("myproj", "/home/r/x", "active", "codex") == (
-        "🟢 [Codex] myproj  ·  /home/r/x"
+        "🟢 Codex: myproj  ·  /home/r/x"
     )
 
 
 def test_top_level_text_ended() -> None:
     assert top_level_text("myproj", "/x", "ended", "gemini") == (
-        "⚪ [Gemini] myproj  ·  /x  (ended)"
+        "⚪ Gemini: myproj  ·  /x  (ended)"
     )
 
 

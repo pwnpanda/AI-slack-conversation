@@ -15,6 +15,7 @@ from slackbot.handlers import EventHandlers
 from slackbot.logging_setup import configure as configure_logging
 from slackbot.matrix_commands import MatrixCommandHandler
 from slackbot.matrix_io import MatrixIO
+from slackbot.matrix_rooms import ensure_joined, resolve_host_room
 from slackbot.registry import Registry
 from slackbot.reply_router import ReplyRouter
 from slackbot.server import make_app
@@ -101,10 +102,28 @@ async def amain() -> None:
             for x in list(delivered_event_ids)[: _DEDUPE_CAP // 2]:
                 delivered_event_ids.discard(x)
 
+    # Per-host routing: resolve (or create) a room named after this machine's
+    # hostname and send every provider there, so work/private separate by
+    # host. Falls back to the static default + per-agent rooms when disabled.
+    default_room = cfg.matrix_default_room
+    agent_rooms = cfg.agent_rooms
+    if cfg.room_by_hostname:
+        default_room = await resolve_host_room(
+            cfg.matrix_homeserver,
+            cfg.matrix_access_token,
+            cfg.hostname,
+            cfg.matrix_user_user_id,
+        )
+        agent_rooms = {}  # all providers share the host room
+        log.info("per-host routing: %s -> %s", cfg.hostname, default_room)
+        # The puppet human must be a member to post prompt mirrors.
+        if cfg.matrix_user_access_token:
+            await ensure_joined(cfg.matrix_homeserver, cfg.matrix_user_access_token, default_room)
+
     matrix_io = MatrixIO(
         client,
-        cfg.matrix_default_room,
-        cfg.agent_rooms,
+        default_room,
+        agent_rooms,
         user_client=user_client,
         on_self_post=_remember_self_post,
     )

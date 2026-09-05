@@ -39,16 +39,19 @@ def top_level_text(
 ) -> str:
     """Render a session's top-level header line.
 
+    The label is `Provider: name` (e.g. "Claude: ftp") so mixed-provider
+    per-host rooms read clearly in Element's thread list.
+
     `recent=True` appends a trailing 🆕 marker to highlight that the bot
     has posted into this thread within the last N seconds. The leading
     🟢/⚪ status glyph stays constant so the only visible change in
     Element's thread list is the trailing emoji appearing/disappearing.
     """
-    prefix = f"[{agent_label(agent)}] "
+    label = agent_label(agent)
     if status == "active":
         suffix = "  🔥🆕" if recent else ""
-        return f"🟢 {prefix}{name}  ·  {cwd}{suffix}"
-    return f"⚪ {prefix}{name}  ·  {cwd}  (ended)"
+        return f"🟢 {label}: {name}  ·  {cwd}{suffix}"
+    return f"⚪ {label}: {name}  ·  {cwd}  (ended)"
 
 
 def _attach_body(text: str) -> str:
