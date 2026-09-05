@@ -277,6 +277,24 @@ class Registry:
             (cc_session_id,),
         )
 
+    def repoint_active_sessions(self, room_id: str) -> int:
+        """Move every active session into room_id, returning the number moved.
+
+        Sessions pin the room they were created in, so switching to per-host
+        routing would otherwise strand pre-existing sessions in whichever room
+        they started in. The thread root is dropped along with the room because
+        that event lives in the *old* room — keeping it would thread new
+        messages onto a root the new room has never seen. The name is kept, so
+        each session simply opens a fresh top-level under its own name on its
+        next event. Ended sessions are left alone: their threads are history.
+        """
+        cur = self._c().execute(
+            "UPDATE sessions SET matrix_room_id = ?, matrix_thread_root = NULL "
+            "WHERE status = 'active' AND matrix_room_id != ?",
+            (room_id, room_id),
+        )
+        return cur.rowcount
+
     def set_pending_notification(
         self,
         cc_session_id: str,

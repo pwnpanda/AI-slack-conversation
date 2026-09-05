@@ -122,6 +122,11 @@ async def amain() -> None:
         )
         agent_rooms = {}  # all providers share the host room
         log.info("per-host routing: %s -> %s", cfg.hostname, default_room)
+        # Sessions pin their room at creation, so anything created before
+        # per-host routing would keep posting to its old room forever.
+        moved = reg.repoint_active_sessions(default_room)
+        if moved:
+            log.info("repointed %d active session(s) into %s", moved, default_room)
         # The puppet human must be a member to post prompt mirrors.
         if cfg.matrix_user_access_token:
             await ensure_joined(cfg.matrix_homeserver, cfg.matrix_user_access_token, default_room)

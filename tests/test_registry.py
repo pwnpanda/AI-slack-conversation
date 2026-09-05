@@ -327,3 +327,43 @@ def test_meta_table_added_to_preexisting_db(tmp_db_path: str) -> None:
     reg.set_meta("anything", "ok")
     assert reg.get_meta("anything") == "ok"
     reg.close()
+
+
+def test_repoint_active_sessions_moves_and_unbinds(tmp_db_path: str) -> None:
+    """Sessions created before per-host routing must be pulled into the host
+    room, dropping the thread root that only exists in the old room."""
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("old", "/x", "ai", "1", agent="claude", matrix_room_id="!claude:srv")
+    reg.set_name("old", "ftp")
+    reg.set_matrix_thread_root("old", "$root:srv")
+
+    moved = reg.repoint_active_sessions("!host:srv")
+
+    assert moved == 1
+    sess = reg.get_session("old")
+    assert sess is not None
+    assert sess.matrix_room_id == "!host:srv"
+    assert sess.matrix_thread_root is None
+    assert sess.name == "ftp"  # name survives so the new top-level is recognisable
+    reg.close()
+
+
+def test_repoint_active_sessions_skips_ended_and_already_correct(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("done", "/x", "ai", "1", agent="claude", matrix_room_id="!claude:srv")
+    reg.set_status("done", "ended")
+    reg.upsert_session("here", "/y", "ai", "2", agent="claude", matrix_room_id="!host:srv")
+    reg.set_matrix_thread_root("here", "$keep:srv")
+
+    moved = reg.repoint_active_sessions("!host:srv")
+
+    assert moved == 0
+    ended = reg.get_session("done")
+    assert ended is not None
+    assert ended.matrix_room_id == "!claude:srv"  # history stays where it happened
+    live = reg.get_session("here")
+    assert live is not None
+    assert live.matrix_thread_root == "$keep:srv"  # untouched, no needless re-thread
+    reg.close()
