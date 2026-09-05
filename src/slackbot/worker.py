@@ -179,9 +179,11 @@ class Worker:
             "context": ev.get("context", ""),
             "agent": sess.agent,
         }
-        if sess.name is None or sess.matrix_thread_root is None:
+        bound = await self._ensure_thread_root(sess)
+        if bound is None:
             self._reg.buffer_event(self._sid, "notification", json.dumps(data))
             return
+        sess = bound
         await self._mark_pending_notification_resolved()
         text = format_event("notification", data)
         chunks = chunk_for_matrix(text)
@@ -282,14 +284,57 @@ class Worker:
         except Exception:
             log.exception("worker[%s] failed to mark notification resolved", self._sid)
 
+    async def _ensure_thread_root(self, sess: Any) -> Any | None:
+        """Return the session with a thread root guaranteed, or None if it
+        cannot have one yet because the session is still unnamed.
+
+        A top-level is normally posted once, when a session is first named. A
+        session that changes rooms has to drop its root — the root event only
+        exists in the old room — and the naming path never fires again for an
+        already-named session. Without recreating it here such a session would
+        buffer its output forever, which is exactly what a room switch caused.
+        """
+        if sess.matrix_thread_root is not None:
+            return sess
+        if sess.name is None:
+            return None
+        event_id = await self._matrix.post_top_level(
+            top_level_text(sess.name, sess.cwd, sess.status, sess.agent),
+            room_id=sess.matrix_room_id,
+        )
+        self._reg.set_matrix_thread_root(self._sid, event_id)
+        log.info(
+            "worker[%s] recreated top-level %s in %s",
+            self._sid,
+            event_id,
+            sess.matrix_room_id,
+        )
+        refreshed = self._reg.get_session(self._sid)
+        if refreshed is not None:
+            await self._replay_buffered(refreshed)
+        return refreshed
+
+    async def _replay_buffered(self, sess: Any) -> None:
+        """Post everything buffered while the session had no thread, oldest
+        first, so the recreated thread keeps the output it accumulated."""
+        for buffered in self._reg.drain_unposted(self._sid):
+            data = json.loads(buffered.payload)
+            for chunk in chunk_for_matrix(format_event(buffered.kind, data)):
+                await self._matrix.post_in_thread(
+                    sess.matrix_thread_root, chunk, room_id=sess.matrix_room_id
+                )
+            self._reg.mark_event_posted(buffered.id, "replayed")
+
     async def _mirror(self, kind: str, data: dict[str, Any], uuid: str | None) -> None:
         sess = self._reg.get_session(self._sid)
         if sess is None:
             return
-        if sess.name is None or sess.matrix_thread_root is None:
-            # Buffer for replay when /rn or auto-recovery binds the thread.
+        bound = await self._ensure_thread_root(sess)
+        if bound is None:
+            # Still unnamed: buffer for replay when /rn binds the thread.
             self._reg.buffer_event(self._sid, kind, json.dumps({**data, "agent": sess.agent}))
             return
+        sess = bound
         # Prompts originate from the human; if a user-puppet client is wired
         # up, post them under the user's identity with no '[Claude] 👤'
         # prefix — Element shows the user's avatar/displayname inline so

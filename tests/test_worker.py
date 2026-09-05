@@ -582,3 +582,79 @@ async def test_responses_still_post_as_bot_even_with_user_client(tmp_db_path: st
     matching = [p for p in matrix.posts_with_flag if p[1].startswith("[Claude] 🤖")]
     assert len(matching) == 1
     assert matching[0][2] is False
+
+
+@pytest.mark.asyncio
+async def test_worker_recreates_top_level_for_named_session_without_thread(
+    tmp_db_path: str,
+) -> None:
+    """A named session that lost its thread root (room switch) must get a new
+    top-level. Nothing else recreates one once a session is named, so without
+    this the session buffers its output forever and the room stays empty."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("s1", "/x", "main", "13", agent="claude", matrix_room_id="!host:server")
+    reg.set_name("s1", "myproj")  # named, but never thread-bound
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+
+    await worker.enqueue({"kind": "response", "uuid": "a1", "parentUuid": "u1", "text": "hello"})
+    await worker.stop()
+
+    assert matrix.top_level_posts == ["🟢 Claude: myproj  ·  /x"]
+    sess = reg.get_session("s1")
+    assert sess is not None
+    assert sess.matrix_thread_root == "$top.1"  # persisted, so later events reuse it
+    assert matrix.posts == [("$top.1", "[Claude] 🤖 hello")]
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_replays_buffered_events_into_recreated_thread(tmp_db_path: str) -> None:
+    """Output buffered while the session had no thread is posted into the new
+    thread, oldest first, ahead of the event that triggered the recreation."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("s1", "/x", "main", "13", agent="claude", matrix_room_id="!host:server")
+    reg.set_name("s1", "myproj")
+    reg.buffer_event("s1", "response", '{"text":"older","agent":"claude"}')
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+
+    await worker.enqueue({"kind": "response", "uuid": "a1", "parentUuid": "u1", "text": "newer"})
+    await worker.stop()
+
+    assert [text for _, text in matrix.posts] == [
+        "[Claude] 🤖 older",
+        "[Claude] 🤖 newer",
+    ]
+    assert reg.drain_unposted("s1") == []  # buffer consumed, not replayed twice
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_still_buffers_when_session_is_unnamed(tmp_db_path: str) -> None:
+    """An unnamed session has no label to post, so it must keep buffering
+    rather than opening an anonymous top-level."""
+    from slackbot.registry import Registry
+
+    reg = Registry(tmp_db_path)
+    reg.open()
+    reg.upsert_session("s1", "/x", "main", "13", agent="claude", matrix_room_id="!host:server")
+    matrix = FakeMatrixIO()
+    worker = Worker(sid="s1", reg=reg, matrix=matrix, actuator=FakeActuator())
+    await worker.start()
+
+    await worker.enqueue({"kind": "response", "uuid": "a1", "parentUuid": "u1", "text": "hello"})
+    await worker.stop()
+
+    assert matrix.top_level_posts == []
+    assert matrix.posts == []
+    assert len(reg.drain_unposted("s1")) == 1
+    reg.close()
