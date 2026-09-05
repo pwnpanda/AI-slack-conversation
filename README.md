@@ -190,8 +190,25 @@ just re-point the symlink and `systemctl --user restart claude-slack-bot`.
 - Top-level message per named session, thread per session lifetime (`m.thread` relations)
 - Codex/Gemini auto-registration with names like `codex-project-abcdef12`
 - Portable Codex rename prompt: `rn my-session`
-- Agent labels in Matrix messages: `[Claude]`, `[Codex]`, `[Gemini]`
-- Optional per-agent Matrix rooms via `MATRIX_ROOM_ID_CLAUDE`, `MATRIX_ROOM_ID_CODEX`, `MATRIX_ROOM_ID_GEMINI`
+- **Per-host Matrix rooms.** On startup the daemon resolves a room named after
+  the machine's hostname (e.g. `Monster-Desktop`), creating and inviting you to
+  it if it does not exist, and routes *all* providers there. Adding a daemon to
+  a new machine needs no config — it provisions its own room — and removing one
+  leaves the others untouched, which is what keeps work and private separate.
+  Disable with `SLACKBOT_ROOM_BY_HOSTNAME=0`; override the name with
+  `SLACKBOT_HOSTNAME`.
+- Top-level session labels read `Provider: topic · cwd`, e.g.
+  `🟢 Claude: ftp · /home/robin/git/priv/ftp`
+- **Thread deletion.** React 🗑️ on a thread's top-level message, or reply `/del`
+  (or `/delete`) inside the thread. Both redact the root and every descendant
+  (replies, edits, reactions) server-side for all clients, and clear the
+  session's registry binding so a still-live session opens a fresh thread next
+  time. The bot holds PL100 in rooms it created, so it can redact any sender's
+  events. Note this is *redaction*, not a database purge: content is gone but
+  an empty tombstone event remains, which only a Continuwuity server admin can
+  remove.
+- Optional per-agent Matrix rooms via `MATRIX_ROOM_ID_CLAUDE`, `MATRIX_ROOM_ID_CODEX`,
+  `MATRIX_ROOM_ID_GEMINI` (only consulted when per-host routing is disabled)
 - Event buffering for prompts that arrive before naming
 - Resume detection: same `session_id` → flips top-level back to 🟢
 - Name reclaim: new session adopting an existing name reuses the same thread
@@ -270,6 +287,7 @@ the last pre-migration commit on `main`.
 
 | Session | Summary | Date |
 |---------|---------|------|
+| `ai-chatbot` | Added per-host Matrix rooms (hostname-named, auto-provisioned, all providers) with `Provider: topic · cwd` labels, and thread deletion via 🗑️ reaction or `/del` (redacts root + all descendants, clears the registry binding). Froze `main` as a stale baseline; `ai-zellij-session` is the living branch. | 2026-09-05 |
 | `matrix-thread-replies` | Fixed direct prompt/response hook fallback so Codex assistant replies mirror into the bound Matrix thread when transcript tailing is unavailable. | 2026-06-08 |
 | `obsidian-publish-rule` | Added a global `ExitPlanMode` hook that publishes plans to Obsidian `for_evaluation/<project>/` for mobile review, plus `reconcile_plans.py` for manual copy-back, and a CLAUDE.md rule. Source lives in `homelabs/Obsidian/plan-review/`, symlinked into `~/.claude/hooks/`. | 2026-05-30 |
 | `matrix-port` | Ported the daemon from Slack to Matrix (matrix-nio): replaced `slack_io`/`slack_poller`/`slack_commands`, renamed registry schema, rewrote `__main__` around `sync_forever`. | 2026-05-29 |
