@@ -7,10 +7,11 @@ import logging
 import signal
 
 from aiohttp import web
-from nio import AsyncClient, RoomMessageText, SyncResponse
+from nio import AsyncClient, ReactionEvent, RoomMessageText, SyncResponse
 
 from slackbot import sd_notify
 from slackbot.config import load_config
+from slackbot.deletion import delete_thread
 from slackbot.handlers import EventHandlers
 from slackbot.logging_setup import configure as configure_logging
 from slackbot.matrix_commands import MatrixCommandHandler
@@ -27,6 +28,9 @@ log = logging.getLogger("slackbot.main")
 _READER_POLL_INTERVAL = 0.5
 _REAPER_INTERVAL = 30.0
 _WATCHDOG_INTERVAL = 60.0
+# Reacting with 🗑️ on a thread's top-level deletes the thread. Accept both
+# the emoji-presentation (VS16) and plain codepoint forms clients may send.
+_DELETE_EMOJI = {"\U0001f5d1️", "\U0001f5d1"}
 # Registry key holding the Matrix sync cursor between daemon runs.
 _SYNC_TOKEN_KEY = "matrix_sync_token"
 
@@ -165,6 +169,9 @@ async def amain() -> None:
         if event_id in delivered_event_ids:
             return
         _remember_self_post(event_id)
+        if text.strip().lower() in ("/del", "/delete"):
+            await delete_thread(matrix_io, reg, room_id, thread_root)
+            return
         log.info(
             "thread reply received: room=%s thread_root=%s event_id=%s len=%d",
             room_id,
@@ -194,6 +201,26 @@ async def amain() -> None:
             return
         await handle_thread_reply(room.room_id, thread_root, text, event.event_id)
 
+    async def on_reaction(room, event) -> None:
+        # 🗑️ on a thread's top-level message → delete the whole thread.
+        sd_notify.watchdog()
+        if not backlog_consumed:
+            return
+        if event.sender == client.user_id:
+            return
+        relates = event.source.get("content", {}).get("m.relates_to", {}) or {}
+        if relates.get("rel_type") != "m.annotation":
+            return
+        if relates.get("key") not in _DELETE_EMOJI:
+            return
+        target = relates.get("event_id")
+        if not target:
+            return
+        sess = reg.get_session_by_matrix_thread(target, room.room_id)
+        if sess is None:
+            return  # reaction on some non-thread-root event; ignore
+        await delete_thread(matrix_io, reg, room.room_id, target)
+
     def _on_sync(response) -> None:
         nonlocal backlog_consumed
         sd_notify.watchdog()
@@ -202,6 +229,7 @@ async def amain() -> None:
             reg.set_meta(_SYNC_TOKEN_KEY, response.next_batch)
 
     client.add_event_callback(on_room_message, RoomMessageText)
+    client.add_event_callback(on_reaction, ReactionEvent)
     client.add_response_callback(_on_sync, SyncResponse)
 
     http_app = make_app(handlers)

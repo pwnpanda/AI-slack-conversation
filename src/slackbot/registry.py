@@ -268,6 +268,15 @@ class Registry:
             (thread_root, cc_session_id),
         )
 
+    def clear_thread_binding(self, cc_session_id: str) -> None:
+        """Drop name + thread binding after its thread is deleted, so a later
+        event from a still-live session starts a fresh top-level instead of
+        posting into the now-redacted thread."""
+        self._c().execute(
+            "UPDATE sessions SET name = NULL, matrix_thread_root = NULL WHERE cc_session_id = ?",
+            (cc_session_id,),
+        )
+
     def set_pending_notification(
         self,
         cc_session_id: str,

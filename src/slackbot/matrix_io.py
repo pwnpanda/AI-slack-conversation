@@ -205,3 +205,52 @@ class MatrixIO:
             )
         except Exception as exc:
             log.warning("reaction %s on %s failed (non-fatal): %s", emoji, ts, exc)
+
+    async def redact(self, room_id: str, event_id: str, reason: str = "deleted") -> None:
+        """Redact a single event. The bot holds PL100 in rooms it created, so
+        it can redact anyone's events (its own, the puppet's, the human's)."""
+        await self._client.room_redact(room_id, event_id, reason=reason)
+
+    async def thread_event_ids(self, room_id: str, thread_root: str) -> list[str]:
+        """Return the thread root plus every event related to it (m.thread
+        children AND their reactions/edits), newest-last. Used to redact a
+        whole thread. Paginates the /relations endpoint via REST since nio's
+        relation helpers don't expose recursive relations cleanly.
+        """
+        import aiohttp
+
+        base = str(self._client.homeserver).rstrip("/")
+        headers = {"Authorization": f"Bearer {self._client.access_token}"}
+        ids: list[str] = []
+        url = (
+            f"{base}/_matrix/client/v1/rooms/{room_id}/relations/{thread_root}"
+            "?recurse=true&limit=100"
+        )
+        async with aiohttp.ClientSession() as http:
+            while url:
+                async with http.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        log.warning(
+                            "relations fetch for %s failed (%s): %s",
+                            thread_root,
+                            resp.status,
+                            body[:200],
+                        )
+                        break
+                    data = await resp.json()
+                for child in data.get("chunk", []):
+                    eid = child.get("event_id")
+                    if eid:
+                        ids.append(eid)
+                next_batch = data.get("next_batch")
+                if not next_batch:
+                    break
+                url = (
+                    f"{base}/_matrix/client/v1/rooms/{room_id}/relations/{thread_root}"
+                    f"?recurse=true&limit=100&from={next_batch}"
+                )
+        # Redact children first, root last, so clients don't briefly show an
+        # orphaned root with dangling relations.
+        ids.append(thread_root)
+        return ids
