@@ -4,6 +4,17 @@ Bridge between Claude Code, Codex, and Gemini CLI sessions and Matrix: mirrors s
 
 > Migrated from Slack to Matrix on the `matrix-port` branch. The repo name (`claude-slack-bot`) and Python package (`slackbot`) are unchanged from the Slack era; the transport underneath them is now Matrix.
 
+> **`main` is frozen (2026-09-05). Do not deploy or develop it — use `ai-zellij-session`.**
+>
+> `ai-zellij-session` is the living branch and is what runs on every host. `main` is
+> kept only as the plain-Matrix baseline as of `de6ebf1`: it predates the dedicated
+> `ai` zellij session, per-host rooms, thread deletion, and several daemon fixes
+> (duplicate mirrors, sync-history replay, hook `transcript_path`, Codex
+> `response_item` mirroring). General fixes are no longer back-ported here — the
+> back-port cost stopped being worth it for a branch nothing deploys.
+>
+> To see what `main` is missing: `git log --oneline main..ai-zellij-session`.
+
 ## What this does
 
 Registers Claude sessions with `/rn <name>`, and auto-registers Codex/Gemini sessions because those CLIs do not provide the same custom slash-command path. The bot posts a top-level message naming the session and mirrors every subsequent prompt, response, and notification into the thread beneath it. Replying in that Matrix thread types your reply into the originating Zellij pane (via `zellij action write-chars`).
