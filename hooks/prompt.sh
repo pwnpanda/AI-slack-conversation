@@ -9,6 +9,9 @@ prompt="$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null || true)"
 # bot can backfill the registry when the row was auto-created without it.
 cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [ -n "$cwd" ] || cwd="$PWD"
+# Forward the transcript path so the daemon knows a reader already mirrors
+# this session and must not post the hook text a second time.
+transcript_path="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
 if [ -z "$sid" ]; then
   printf '{}\n'
   exit 0
@@ -49,9 +52,10 @@ cc_pid="$PPID"
 prompt_payload="$(jq -n \
   --arg sid "$sid" --arg agent "$agent" --arg t "$prompt" --arg cwd "$cwd" \
   --arg zs "${ZELLIJ_SESSION_NAME:-}" --arg zp "${ZELLIJ_PANE_ID:-}" \
+  --arg tx "$transcript_path" \
   --argjson cc_pid "$cc_pid" \
   '{v:1,kind:"prompt",session_id:$sid,agent:$agent,text:$t,cwd:$cwd,
-    zellij_session:$zs,zellij_pane_id:$zp,cc_pid:$cc_pid}')"
+    zellij_session:$zs,zellij_pane_id:$zp,transcript_path:$tx,cc_pid:$cc_pid}')"
 post "$prompt_payload" || true
 
 if [ -n "$name" ]; then

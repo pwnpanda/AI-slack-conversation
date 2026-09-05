@@ -273,3 +273,50 @@ def test_reader_handles_string_content_legacy(tmp_path: Path) -> None:
     events = list(reader.drain())
     assert events == [{"kind": "response", "uuid": "a1", "parentUuid": "u1", "text": "legacy text"}]
     reader.close()
+
+
+def test_reader_emits_codex_user_and_assistant_messages(tmp_path: Path) -> None:
+    p = tmp_path / "rollout.jsonl"
+    p.write_text("")
+    reader = TranscriptReader(p)
+    reader.open()
+    _append(
+        p,
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "u1",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "a1",
+                "role": "assistant",
+                "phase": "final",
+                "content": [{"type": "output_text", "text": "hello back"}],
+            },
+        },
+    )
+    assert list(reader.drain()) == [
+        {"kind": "prompt", "uuid": "u1", "parentUuid": None, "text": "hello"},
+        {"kind": "response", "uuid": "a1", "parentUuid": None, "text": "hello back"},
+    ]
+    reader.close()
+
+
+def test_reader_ignores_codex_event_message_duplicate(tmp_path: Path) -> None:
+    p = tmp_path / "rollout.jsonl"
+    p.write_text("")
+    reader = TranscriptReader(p)
+    reader.open()
+    _append(
+        p,
+        {"type": "event_msg", "payload": {"type": "agent_message", "message": "duplicate"}},
+    )
+    assert list(reader.drain()) == []
+    reader.close()

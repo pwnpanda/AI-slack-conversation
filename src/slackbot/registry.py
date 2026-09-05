@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS event_log (
 
 CREATE INDEX IF NOT EXISTS idx_event_log_unposted
   ON event_log(cc_session_id) WHERE matrix_event_id IS NULL;
+
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 """
 
 
@@ -101,6 +106,19 @@ class Registry:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
         if "pending_question" not in cols:
             conn.execute("ALTER TABLE sessions ADD COLUMN pending_question TEXT")
+
+    def get_meta(self, key: str) -> str | None:
+        """Return a daemon-level scalar, or None if it was never written."""
+        row = self._c().execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Write a daemon-level scalar, overwriting any previous value."""
+        self._c().execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
 
     def _drop_pre_matrix_schema_if_present(self) -> None:
         """Detect a pre-Matrix schema (Slack columns) and discard the DB.
@@ -512,6 +530,18 @@ class Registry:
         self._c().execute(
             "UPDATE sessions SET transcript_offset = ? WHERE cc_session_id = ?",
             (offset, cc_session_id),
+        )
+
+    def set_transcript_path(self, cc_session_id: str, transcript_path: str) -> None:
+        """Record where this session's transcript lives.
+
+        Only fills a NULL: an established path is the one the reader is
+        already tailing, and overwriting it would silently move the cursor.
+        """
+        self._c().execute(
+            "UPDATE sessions SET transcript_path = ? "
+            "WHERE cc_session_id = ? AND transcript_path IS NULL",
+            (transcript_path, cc_session_id),
         )
 
     def get_transcript_offset(self, cc_session_id: str) -> int | None:

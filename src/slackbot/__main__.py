@@ -27,6 +27,8 @@ log = logging.getLogger("slackbot.main")
 _READER_POLL_INTERVAL = 0.5
 _REAPER_INTERVAL = 30.0
 _WATCHDOG_INTERVAL = 60.0
+# Registry key holding the Matrix sync cursor between daemon runs.
+_SYNC_TOKEN_KEY = "matrix_sync_token"
 
 
 async def reader_pump(supervisor: Supervisor) -> None:
@@ -142,6 +144,23 @@ async def amain() -> None:
 
     loop = asyncio.get_running_loop()
 
+    # Resume the sync cursor the previous daemon stored, so a restart neither
+    # replays room history nor drops replies sent while we were down. This
+    # matters because prompt mirrors are posted through the user-puppet
+    # account: they arrive back as the *human's* messages, so the
+    # `event.sender == client.user_id` guard below does not filter them, and
+    # `delivered_event_ids` starts empty on every restart. Without a cursor,
+    # the first sync returns the whole visible timeline and every past reply
+    # (ours included) gets retyped into the pane.
+    stored_sync_token = reg.get_meta(_SYNC_TOKEN_KEY)
+    if stored_sync_token:
+        client.next_batch = stored_sync_token
+    # With no stored cursor there is nothing to resume from, so the first sync
+    # is history rather than new traffic. nio runs event callbacks while
+    # handling the sync and response callbacks afterwards, so this flag flips
+    # only once that first batch has been skipped.
+    backlog_consumed = bool(stored_sync_token)
+
     async def handle_thread_reply(room_id: str, thread_root: str, text: str, event_id: str) -> None:
         if event_id in delivered_event_ids:
             return
@@ -157,6 +176,8 @@ async def amain() -> None:
 
     async def on_room_message(room, event) -> None:
         sd_notify.watchdog()
+        if not backlog_consumed:
+            return  # first-ever sync: room history, not traffic to act on
         if event.sender == client.user_id:
             return  # @ai-bot's own post echoed back by sync
         if event.event_id in delivered_event_ids:
@@ -173,8 +194,12 @@ async def amain() -> None:
             return
         await handle_thread_reply(room.room_id, thread_root, text, event.event_id)
 
-    def _on_sync(_response) -> None:
+    def _on_sync(response) -> None:
+        nonlocal backlog_consumed
         sd_notify.watchdog()
+        backlog_consumed = True
+        if getattr(response, "next_batch", None):
+            reg.set_meta(_SYNC_TOKEN_KEY, response.next_batch)
 
     client.add_event_callback(on_room_message, RoomMessageText)
     client.add_response_callback(_on_sync, SyncResponse)
