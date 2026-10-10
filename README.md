@@ -215,6 +215,7 @@ just re-point the symlink and `systemctl --user restart claude-slack-bot`.
 - Reply routing: thread reply → `zellij action write-chars` into the originating pane
 - ✅/⚠️/🚫 Unicode reactions confirming delivery state
 - `/new <name>` top-level command spawns a new CC pane and types `/rn <name>` into it
+- `/help` or `/?` lists every bot command — top-level, or inside a thread (where it is answered in the thread instead of being typed into the pane)
 - **Dedicated `ai` zellij session for agent panes.** `/new` spawns into the
   `ai` session by default, never touching your `main` workspace. The `ai`
   session must be running — install `systemd/zellij-ai.service`

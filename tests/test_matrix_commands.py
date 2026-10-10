@@ -173,3 +173,34 @@ async def test_resume_pattern_rejects_extra_args(tmp_db_path: str) -> None:
     assert await cmd.maybe_handle(room_id="!c:s", text="/resume", msg_ts="m") is False
     assert await cmd.maybe_handle(room_id="!c:s", text="/resumex Finance", msg_ts="m") is False
     reg.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["/help", "/?", "  /HELP  "])
+async def test_help_replies_with_command_list(tmp_db_path: str, text: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    matrix = _FakeMatrix()
+    actuator = _FakeActuator()
+    cmd = _handler(reg, matrix, actuator)
+    handled = await cmd.maybe_handle(room_id="!x:server", text=text, msg_ts="$H:server")
+    assert handled is True
+    assert len(matrix.in_thread) == 1
+    root, body, room = matrix.in_thread[0]
+    assert (root, room) == ("$H:server", "!x:server")
+    for command in ("/new", "/resume", "/del", "/help", "/?", "🗑️"):
+        assert command in body
+    assert actuator.spawns == []
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_help_rejects_trailing_text(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    matrix = _FakeMatrix()
+    cmd = _handler(reg, matrix)
+    assert await cmd.maybe_handle(room_id="!x:server", text="/help me", msg_ts="m") is False
+    assert await cmd.maybe_handle(room_id="!x:server", text="/??", msg_ts="m") is False
+    assert matrix.in_thread == []
+    reg.close()

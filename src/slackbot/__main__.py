@@ -14,7 +14,7 @@ from slackbot.config import load_config
 from slackbot.deletion import delete_thread
 from slackbot.handlers import EventHandlers
 from slackbot.logging_setup import configure as configure_logging
-from slackbot.matrix_commands import MatrixCommandHandler
+from slackbot.matrix_commands import HELP_TEXT, MatrixCommandHandler, is_help_command
 from slackbot.matrix_io import MatrixIO
 from slackbot.matrix_rooms import ensure_joined, resolve_host_room
 from slackbot.registry import Registry
@@ -176,6 +176,10 @@ async def amain() -> None:
         _remember_self_post(event_id)
         if text.strip().lower() in ("/del", "/delete"):
             await delete_thread(matrix_io, reg, room_id, thread_root)
+            return
+        if is_help_command(text):
+            # Answer in the thread instead of typing "/help" into the agent's pane.
+            await matrix_io.post_in_thread(thread_root, HELP_TEXT, room_id=room_id)
             return
         log.info(
             "thread reply received: room=%s thread_root=%s event_id=%s len=%d",

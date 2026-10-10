@@ -2,6 +2,7 @@
 
 `/new <name>` — spawn a fresh CC pane in zellij, type `/rn <name>` into it.
 `/resume <name>` — spawn a CC pane resuming the named session (`claude --resume <name>`).
+`/help` or `/?` — list every command the bot understands (also works inside a thread).
 """
 
 from __future__ import annotations
@@ -16,6 +17,28 @@ log = logging.getLogger(__name__)
 
 _NEW_PATTERN = re.compile(r"^/new\s+(\S+)\s*$")
 _RESUME_PATTERN = re.compile(r"^/resume\s+(\S+)\s*$")
+_HELP_COMMANDS = ("/help", "/?")
+
+HELP_TEXT = """**Commands**
+
+_Top-level message in the room:_
+- `/new <name>` — open a new Claude pane in the `ai` zellij session, named `<name>`
+- `/resume <name>` — open a pane resuming the named Claude session
+- `/help` or `/?` — show this list
+
+_Reply inside a session's thread:_
+- any text — typed into that session's pane
+- a number (e.g. `2`) while Claude is asking a question — picks that option
+- `/del` or `/delete` — delete the whole thread
+- `/help` or `/?` — show this list
+
+_Reaction on a session's top-level message:_
+- 🗑️ — delete the whole thread"""
+
+
+def is_help_command(text: str) -> bool:
+    """True if *text* asks for the command list, wherever it was sent."""
+    return text.strip().lower() in _HELP_COMMANDS
 
 
 class _MatrixIOProto(Protocol):
@@ -57,6 +80,9 @@ class MatrixCommandHandler:
     async def maybe_handle(self, room_id: str, text: str, msg_ts: str) -> bool:
         """Return True if *text* matched a command and was handled."""
         stripped = text.strip()
+        if is_help_command(stripped):
+            await self._matrix.post_in_thread(msg_ts, HELP_TEXT, room_id=room_id)
+            return True
         m = _NEW_PATTERN.match(stripped)
         if m:
             await self._handle_new(room_id=room_id, name=m.group(1), msg_ts=msg_ts)
