@@ -250,7 +250,9 @@ async def test_event_after_ended_self_heals_status_and_reattaches_reader(
     transcript.write_text("")
     await h.handle(_start(sid="s1") | {"transcript_path": str(transcript)})
     await h.handle({"kind": "end", "session_id": "s1", "reason": "exit"})
-    assert reg.get_session("s1").status == "ended"
+    session = reg.get_session("s1")
+    assert session is not None
+    assert session.status == "ended"
     assert "s1" not in sup._readers
     # A fresh hook event arrives — CC must be back.
     await h.handle(
@@ -260,7 +262,9 @@ async def test_event_after_ended_self_heals_status_and_reattaches_reader(
             "message": "Claude needs your permission to use Bash",
         }
     )
-    assert reg.get_session("s1").status == "active"
+    session = reg.get_session("s1")
+    assert session is not None
+    assert session.status == "active"
     assert "s1" in sup._readers
     await sup.shutdown()
 
@@ -305,7 +309,9 @@ async def test_prompt_hook_backfills_transcript_path_and_attaches_reader(
     h = EventHandlers(reg, sup, shared_matrix)
     # Row exists but predates any payload that carried a transcript path.
     await h.handle(_start())
-    assert reg.get_session("s1").transcript_path is None
+    session = reg.get_session("s1")
+    assert session is not None
+    assert session.transcript_path is None
     assert not sup.has_reader("s1")
 
     await h.handle(
@@ -319,7 +325,9 @@ async def test_prompt_hook_backfills_transcript_path_and_attaches_reader(
     )
     await asyncio.sleep(0.05)
 
-    assert reg.get_session("s1").transcript_path == str(transcript)
+    session = reg.get_session("s1")
+    assert session is not None
+    assert session.transcript_path == str(transcript)
     assert sup.has_reader("s1")
     assert shared_matrix.thread_posts == []
     await sup.shutdown()

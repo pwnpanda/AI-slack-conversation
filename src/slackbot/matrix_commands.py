@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 _NEW_PATTERN = re.compile(r"^/new\s+(\S+)\s*$")
 _RESUME_PATTERN = re.compile(r"^/resume\s+(\S+)\s*$")
+_LOCAL_PATTERN = re.compile(r"^/local(?:\s+(.+))?$", re.DOTALL)
 _HELP_COMMANDS = ("/help", "/?")
 
 HELP_TEXT = """**Commands**
@@ -24,10 +25,12 @@ HELP_TEXT = """**Commands**
 _Top-level message in the room:_
 - `/new <name>` — open a new Claude pane in the `ai` zellij session, named `<name>`
 - `/resume <name>` — open a pane resuming the named Claude session
+- `/local <prompt>` — start a streamed conversation with the local model
 - `/help` or `/?` — show this list
 
 _Reply inside a session's thread:_
 - any text — typed into that session's pane
+- in a `/local` thread, any text continues the local-model conversation
 - a number (e.g. `2`) while Claude is asking a question — picks that option
 - `/del` or `/delete` — delete the whole thread
 - `/help` or `/?` — show this list
@@ -58,6 +61,10 @@ class _ActuatorProto(Protocol):
     ) -> None: ...
 
 
+class _LocalChatProto(Protocol):
+    def start_background(self, room_id: str, thread_root: str, prompt: str) -> None: ...
+
+
 class MatrixCommandHandler:
     """Dispatch top-level Matrix messages that start with a slash command."""
 
@@ -66,9 +73,11 @@ class MatrixCommandHandler:
         reg: Registry,
         matrix: _MatrixIOProto,
         actuator: _ActuatorProto,
+        *,
         zellij_session: str,
         new_pane_command: tuple[str, ...],
         new_pane_delay_seconds: float,
+        local_chat: _LocalChatProto | None = None,
     ) -> None:
         self._reg = reg
         self._matrix = matrix
@@ -76,12 +85,17 @@ class MatrixCommandHandler:
         self._zellij_session = zellij_session
         self._new_pane_command = new_pane_command
         self._new_pane_delay_seconds = new_pane_delay_seconds
+        self._local_chat = local_chat
 
     async def maybe_handle(self, room_id: str, text: str, msg_ts: str) -> bool:
         """Return True if *text* matched a command and was handled."""
         stripped = text.strip()
         if is_help_command(stripped):
             await self._matrix.post_in_thread(msg_ts, HELP_TEXT, room_id=room_id)
+            return True
+        m = _LOCAL_PATTERN.match(stripped)
+        if m:
+            await self._handle_local(room_id, msg_ts, m.group(1))
             return True
         m = _NEW_PATTERN.match(stripped)
         if m:
@@ -92,6 +106,23 @@ class MatrixCommandHandler:
             await self._handle_resume(room_id=room_id, name=m.group(1), msg_ts=msg_ts)
             return True
         return False
+
+    async def _handle_local(self, room_id: str, msg_ts: str, prompt: str | None) -> None:
+        if self._local_chat is None:
+            await self._matrix.post_in_thread(
+                msg_ts,
+                "❌ Local model integration is not configured on this host.",
+                room_id=room_id,
+            )
+            return
+        if not prompt or not prompt.strip():
+            await self._matrix.post_in_thread(
+                msg_ts,
+                "Usage: `/local <prompt>`",
+                room_id=room_id,
+            )
+            return
+        self._local_chat.start_background(room_id, msg_ts, prompt.strip())
 
     async def _handle_new(self, room_id: str, name: str, msg_ts: str) -> None:
         existing = self._reg.get_session_by_name(name, room_id=room_id)

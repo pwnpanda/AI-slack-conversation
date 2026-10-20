@@ -1,11 +1,12 @@
 [Unit]
 Description=Bridge Claude Code sessions into Matrix
-After=network-online.target
-Wants=network-online.target
+After=network-online.target llama-server.service
+Wants=network-online.target llama-server.service
 
 [Service]
 Type=notify
 EnvironmentFile=%h/.config/claude-slack-bot/env
+EnvironmentFile=-%h/.config/llama-server/env
 # Host-agnostic path: each host symlinks ~/.local/share/claude-slack-bot/app
 # at its own checkout (see README "Multi-host deployment"). This keeps the
 # unit identical across machines whose clone lives at a different path

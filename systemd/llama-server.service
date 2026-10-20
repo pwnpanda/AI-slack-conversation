@@ -1,0 +1,29 @@
+[Unit]
+Description=Local llama.cpp API server for Matrix chat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/llama-server/env
+ExecStartPre=/usr/bin/test -x %h/.local/bin/llama-server
+ExecStartPre=/usr/bin/test -r ${LLAMA_MODEL_PATH}
+ExecStart=%h/.local/bin/llama-server \
+  --model ${LLAMA_MODEL_PATH} \
+  --alias ${LOCAL_LLM_MODEL} \
+  --host 127.0.0.1 \
+  --port 9322 \
+  --gpu-layers 99 \
+  --ctx-size 4096 \
+  --parallel 1 \
+  --reasoning off \
+  --sleep-idle-seconds 1980
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

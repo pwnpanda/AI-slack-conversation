@@ -16,11 +16,11 @@ fi
 # input" notifications are noise in bypass-permissions mode, so the hook
 # drops them entirely instead of POSTing.
 case "$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')" in
-  *permission*|*approve*|*allow*|*needs\ your*) ;;
-  *)
-    printf '{}\n'
-    exit 0
-    ;;
+*permission* | *approve* | *allow* | *needs\ your*) ;;
+*)
+  printf '{}\n'
+  exit 0
+  ;;
 esac
 
 # Enrich with context: last assistant text + the most-recent tool_use, so
@@ -43,13 +43,13 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
     fi
   done < <(tac "$transcript" 2>/dev/null)
 
-  tool_request="$(tac "$transcript" 2>/dev/null \
-    | jq -r 'select(.message.role == "assistant") | .message.content
+  tool_request="$(tac "$transcript" 2>/dev/null |
+    jq -r 'select(.message.role == "assistant") | .message.content
               | if type == "array" then
                   (map(select(.type == "tool_use")) | last
                     | if . then "\(.name)(\(.input | tojson))" else empty end)
-                else empty end' 2>/dev/null \
-    | awk 'NF { print; exit }' || true)"
+                else empty end' 2>/dev/null |
+    awk 'NF { print; exit }' || true)"
 fi
 
 cc_pid="$PPID"

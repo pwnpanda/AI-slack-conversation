@@ -26,6 +26,7 @@ def agent_label(agent: str | None) -> str:
         "claude": "Claude",
         "codex": "Codex",
         "gemini": "Gemini",
+        "local": "Local",
     }
     return labels.get((agent or "claude").lower(), "Claude")
 

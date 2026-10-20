@@ -127,7 +127,9 @@ def test_refresh_liveness_updates_fields_without_status_change(tmp_db_path: str)
     reg.open()
     reg.upsert_session("s1", "/x", "main", "3", cc_pid=100)
     reg.set_status("s1", "ended")
-    assert reg.get_session("s1").status == "ended"
+    session = reg.get_session("s1")
+    assert session is not None
+    assert session.status == "ended"
     reg.refresh_liveness("s1", "main", "5", 200)
     sess = reg.get_session("s1")
     assert sess is not None

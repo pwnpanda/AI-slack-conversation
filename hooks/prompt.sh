@@ -24,8 +24,8 @@ post() {
 
 # Detect rename commands and emit a name event. Codex does not support custom
 # slash commands, so bare "rn name" is the portable form.
-name="$(printf '%s' "$prompt" \
-  | sed -n -E \
+name="$(printf '%s' "$prompt" |
+  sed -n -E \
     -e 's@^rn[[:space:]]+([^[:space:]]+)[[:space:]]*$@\1@p' \
     -e 's@^[/#!](rn|rename|register)[[:space:]]+([^[:space:]]+)[[:space:]]*$@\2@p')"
 if [ -n "$name" ]; then

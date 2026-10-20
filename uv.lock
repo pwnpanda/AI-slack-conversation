@@ -110,7 +110,7 @@ requires-dist = [
     { name = "aiohttp", specifier = "==3.11.10" },
     { name = "inotify-simple", specifier = "==1.3.5" },
     { name = "markdown", specifier = "==3.7" },
-    { name = "matrix-nio", specifier = ">=0.25.2" },
+    { name = "matrix-nio", specifier = "==0.25.2" },
 ]
 
 [package.metadata.requires-dev]

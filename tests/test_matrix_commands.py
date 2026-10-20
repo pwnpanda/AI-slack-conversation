@@ -41,7 +41,15 @@ class _FakeActuator:
             raise self.raise_on_spawn
 
 
-def _handler(reg, matrix, actuator=None):
+@dataclass
+class _FakeLocalChat:
+    starts: list[tuple[str, str, str]] = field(default_factory=list)
+
+    def start_background(self, room_id: str, thread_root: str, prompt: str) -> None:
+        self.starts.append((room_id, thread_root, prompt))
+
+
+def _handler(reg, matrix, actuator=None, local_chat=None):
     return MatrixCommandHandler(
         reg=reg,
         matrix=matrix,
@@ -49,6 +57,7 @@ def _handler(reg, matrix, actuator=None):
         zellij_session="main",
         new_pane_command=("claude", "--dangerously-skip-permissions"),
         new_pane_delay_seconds=0.01,
+        local_chat=local_chat,
     )
 
 
@@ -188,7 +197,7 @@ async def test_help_replies_with_command_list(tmp_db_path: str, text: str) -> No
     assert len(matrix.in_thread) == 1
     root, body, room = matrix.in_thread[0]
     assert (root, room) == ("$H:server", "!x:server")
-    for command in ("/new", "/resume", "/del", "/help", "/?", "🗑️"):
+    for command in ("/new", "/resume", "/local", "/del", "/help", "/?", "🗑️"):
         assert command in body
     assert actuator.spawns == []
     reg.close()
@@ -203,4 +212,30 @@ async def test_help_rejects_trailing_text(tmp_db_path: str) -> None:
     assert await cmd.maybe_handle(room_id="!x:server", text="/help me", msg_ts="m") is False
     assert await cmd.maybe_handle(room_id="!x:server", text="/??", msg_ts="m") is False
     assert matrix.in_thread == []
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_local_command_starts_model_conversation(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    local_chat = _FakeLocalChat()
+    cmd = _handler(reg, _FakeMatrix(), local_chat=local_chat)
+
+    handled = await cmd.maybe_handle("!room", "/local Replace cats with DOG", "$root")
+
+    assert handled is True
+    assert local_chat.starts == [("!room", "$root", "Replace cats with DOG")]
+    reg.close()
+
+
+@pytest.mark.asyncio
+async def test_local_command_reports_missing_configuration(tmp_db_path: str) -> None:
+    reg = Registry(tmp_db_path)
+    reg.open()
+    matrix = _FakeMatrix()
+    cmd = _handler(reg, matrix)
+
+    assert await cmd.maybe_handle("!room", "/local hello", "$root") is True
+    assert "not configured" in matrix.in_thread[-1][1]
     reg.close()

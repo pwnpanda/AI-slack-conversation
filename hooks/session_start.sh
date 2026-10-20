@@ -12,7 +12,7 @@ fi
 resumed_flag=false
 source="$(printf '%s' "$input" | jq -r '.source // empty' 2>/dev/null || true)"
 case "${CLAUDE_HOOK_SOURCE:-}${source}" in
-  resume|*resume*) resumed_flag=true ;;
+resume | *resume*) resumed_flag=true ;;
 esac
 # $PPID is the parent process — the CC/Codex/Gemini process that invoked this hook.
 # We record it so the daemon can probe liveness with kill -0 instead of falling back

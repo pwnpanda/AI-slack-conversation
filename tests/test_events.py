@@ -13,6 +13,12 @@ def test_top_level_text_ended() -> None:
     )
 
 
+def test_top_level_text_local_model() -> None:
+    assert top_level_text("New Chat", "llama.cpp Web UI", "active", "local") == (
+        "🟢 Local: New Chat  ·  llama.cpp Web UI"
+    )
+
+
 def test_format_prompt_single_line() -> None:
     assert format_event("prompt", {"text": "hello", "agent": "claude"}) == "[Claude] 👤 hello"
 

@@ -12,13 +12,13 @@ set -euo pipefail
 SESSION="ai"
 
 if zellij attach --create-background "$SESSION" 2>/dev/null; then
-    echo "created detached zellij session '$SESSION'"
-    exit 0
+  echo "created detached zellij session '$SESSION'"
+  exit 0
 fi
 
 if zellij list-sessions --short --no-formatting 2>/dev/null | grep -qx "$SESSION"; then
-    echo "zellij session '$SESSION' already running; nothing to do"
-    exit 0
+  echo "zellij session '$SESSION' already running; nothing to do"
+  exit 0
 fi
 
 echo "failed to create zellij session '$SESSION'" >&2

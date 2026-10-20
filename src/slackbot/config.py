@@ -10,6 +10,23 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
+class LocalLlmConfig:
+    """Connection and persistence settings for the optional local model."""
+
+    base_url: str | None
+    api_key: str | None
+    model: str
+    history_dir: str
+    idle_warning_seconds: float
+    idle_grace_seconds: float
+    web_proxy_port: int
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.base_url and self.api_key)
+
+
+@dataclass(frozen=True)
 class Config:
     matrix_homeserver: str
     matrix_user_id: str
@@ -20,6 +37,7 @@ class Config:
     port: int
     db_path: str
     log_level: str
+    local_llm: LocalLlmConfig
     # Per-host routing: when true (default) the daemon resolves a single
     # Matrix room named after this machine's hostname (creating it if
     # absent) and routes ALL providers on this host into it — so work vs
@@ -55,6 +73,23 @@ def _default_db_path() -> str:
     return str(Path(state) / "claude-slack-bot" / "registry.db")
 
 
+def _default_local_history_dir() -> str:
+    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return str(Path(state) / "claude-slack-bot" / "local-chats")
+
+
+def _local_llm_config() -> LocalLlmConfig:
+    return LocalLlmConfig(
+        base_url=os.environ.get("LOCAL_LLM_BASE_URL") or None,
+        api_key=os.environ.get("LLAMA_API_KEY") or None,
+        model=os.environ.get("LOCAL_LLM_MODEL", "qwen3.5-4b-local"),
+        history_dir=os.environ.get("LOCAL_LLM_HISTORY_DIR") or _default_local_history_dir(),
+        idle_warning_seconds=float(os.environ.get("LOCAL_LLM_IDLE_WARNING_SECONDS", "1800")),
+        idle_grace_seconds=float(os.environ.get("LOCAL_LLM_IDLE_GRACE_SECONDS", "180")),
+        web_proxy_port=int(os.environ.get("LOCAL_LLM_WEB_PROXY_PORT", "9321")),
+    )
+
+
 def _agent_rooms() -> dict[str, str]:
     rooms: dict[str, str] = {}
     for agent in ("claude", "codex", "gemini"):
@@ -82,6 +117,7 @@ def load_config() -> Config:
         port=int(os.environ.get("SLACKBOT_PORT", "8787")),
         db_path=os.environ.get("SLACKBOT_DB_PATH") or _default_db_path(),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
+        local_llm=_local_llm_config(),
         new_pane_zellij_session=os.environ.get("SLACKBOT_NEW_PANE_ZELLIJ_SESSION", "ai"),
         new_pane_command=_new_pane_command(),
         new_pane_delay_seconds=float(os.environ.get("SLACKBOT_NEW_PANE_DELAY_SECONDS", "5")),

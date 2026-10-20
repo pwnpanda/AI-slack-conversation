@@ -34,6 +34,7 @@ Registers Claude sessions with `/rn <name>`, and auto-registers Codex/Gemini ses
 - A self-hosted Matrix homeserver (Continuwuity recommended; Synapse works too) reachable from the daemon host
 - A Matrix bot account with an access token
 - Claude Code CLI, Codex CLI, or Gemini CLI
+- Optional local chat: llama.cpp plus the pinned Qwen3.5-4B Q6_K model
 
 ## Installation / Setup
 
@@ -112,6 +113,19 @@ All three post the same event contract to the daemon and include an agent label.
 
 Install **Element X** on Android (or iOS). Log in as your human user against `chat.robinlunde.com`. On Android, install the **ntfy** F-Droid app first and point it at `https://push.robinlunde.com` so Element X picks ntfy as its UnifiedPush distributor on first login (no Google FCM needed). See `docs/plan-matrix-migration.md` §4 for the full push wiring.
 
+### 6. Install the optional local model
+
+Build llama.cpp, download and verify the shared Qwen3.5-4B Q6_K GGUF, then install the
+`llama-server` user service. Exact Vulkan/Linux and CUDA/Windows instructions, pinned commits,
+checksums, and verification commands are in [docs/local-model.md](docs/local-model.md).
+
+On a Linux daemon host where the binary and model already exist:
+
+```bash
+scripts/install-local-model-service.sh \
+  "$HOME/.local/share/llama.cpp/models/Qwen3.5-4B-Q6_K.gguf"
+```
+
 ## Usage
 
 1. Start your agent inside a Zellij pane
@@ -119,6 +133,23 @@ Install **Element X** on Android (or iOS). Log in as your human user against `ch
 3. Codex: optionally rename the thread with `rn my-session`; the hook blocks that control prompt from reaching the model
 4. Type prompts in the agent; they mirror into the Matrix thread
 5. From Element X (mobile or desktop), reply in the thread — the text is typed into the agent pane (the pane briefly takes focus)
+
+For the local model, send `/local <prompt>` as a top-level message. Continue the conversation by
+replying inside its thread. Responses stream through Matrix edits. After 30 idle minutes the bot
+warns before llama.cpp unloads at minute 33; reply exactly `DO NOT CLEAR CACHE` during the
+three-minute grace period to keep it loaded. History remains on disk either way.
+
+The llama.cpp web interface remains available at `http://127.0.0.1:9321`. Browser conversations
+are mirrored automatically: each browser conversation maps to a Matrix thread containing its
+prompts and streamed responses. The browser's supplied history is persisted with that thread, so
+a reply in Matrix can continue the conversation. Non-browser API requests are not mirrored unless
+they include `X-Matrix-Mirror: true`.
+
+Web thread headers use the same convention as agent sessions:
+`🟢 Local: <title>  ·  llama.cpp Web UI`. A new thread initially uses `New Chat`, then the bot
+edits it to the first non-empty line of the conversation's first user message. Prompts appear
+inside the thread under the configured human Matrix identity. The thread header and model
+responses are always sent by `AI-bot`.
 
 ## Testing
 
@@ -163,6 +194,11 @@ Then in Element X: reply to the thread; verify text appears typed into Zellij pa
 ```bash
 journalctl --user -u claude-slack-bot -f
 ```
+
+The optional local model uses `systemd/llama-server.service`. llama.cpp binds to the private
+backend `127.0.0.1:9322`; the Matrix bot exposes its authenticated web/API proxy on
+`127.0.0.1:9321`. It unloads its model/KV cache after 33 idle minutes. The extra three minutes are
+the Matrix veto window after the 30-minute warning.
 
 ### Multi-host deployment
 
@@ -215,6 +251,11 @@ just re-point the symlink and `systemctl --user restart claude-slack-bot`.
 - Reply routing: thread reply → `zellij action write-chars` into the originating pane
 - ✅/⚠️/🚫 Unicode reactions confirming delivery state
 - `/new <name>` top-level command spawns a new CC pane and types `/rn <name>` into it
+- `/local <prompt>` starts a file-backed local-model conversation and streams responses through
+  Matrix message edits
+- Local Qwen3.5-4B chat through llama.cpp's authenticated localhost API
+- Thirty-minute idle warning with a three-minute `DO NOT CLEAR CACHE` veto window; model/KV cache
+  unloading never deletes conversation history
 - `/help` or `/?` lists every bot command — top-level, or inside a thread (where it is answered in the thread instead of being typed into the pane)
 - **Dedicated `ai` zellij session for agent panes.** `/new` spawns into the
   `ai` session by default, never touching your `main` workspace. The `ai`

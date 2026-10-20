@@ -13,6 +13,10 @@ from slackbot import sd_notify
 from slackbot.config import load_config
 from slackbot.deletion import delete_thread
 from slackbot.handlers import EventHandlers
+from slackbot.local_chat import LocalChatManager
+from slackbot.local_chat_store import LocalChatStore
+from slackbot.local_llm_client import LocalLlamaClient
+from slackbot.local_llm_proxy import LocalLlmProxy
 from slackbot.logging_setup import configure as configure_logging
 from slackbot.matrix_commands import HELP_TEXT, MatrixCommandHandler, is_help_command
 from slackbot.matrix_io import MatrixIO
@@ -138,6 +142,23 @@ async def amain() -> None:
         user_client=user_client,
         on_self_post=_remember_self_post,
     )
+    local_chat = None
+    local_proxy_runner = None
+    if cfg.local_llm.enabled:
+        if cfg.local_llm.base_url is None or cfg.local_llm.api_key is None:
+            raise RuntimeError("Local model configuration is incomplete")
+        local_chat = LocalChatManager(
+            client=LocalLlamaClient(
+                cfg.local_llm.base_url,
+                cfg.local_llm.api_key,
+                cfg.local_llm.model,
+            ),
+            store=LocalChatStore(cfg.local_llm.history_dir),
+            matrix=matrix_io,
+            idle_warning_seconds=cfg.local_llm.idle_warning_seconds,
+            idle_grace_seconds=cfg.local_llm.idle_grace_seconds,
+        )
+        log.info("local model Matrix chat enabled: %s", cfg.local_llm.base_url)
     actuator = ZellijActuator()
     supervisor = Supervisor(reg=reg, matrix=matrix_io, actuator=actuator)
     handlers = EventHandlers(reg, supervisor, matrix_io)
@@ -149,6 +170,7 @@ async def amain() -> None:
         zellij_session=cfg.new_pane_zellij_session,
         new_pane_command=cfg.new_pane_command,
         new_pane_delay_seconds=cfg.new_pane_delay_seconds,
+        local_chat=local_chat,
     )
 
     loop = asyncio.get_running_loop()
@@ -175,11 +197,16 @@ async def amain() -> None:
             return
         _remember_self_post(event_id)
         if text.strip().lower() in ("/del", "/delete"):
+            if local_chat is not None and local_chat.is_conversation(room_id, thread_root):
+                local_chat.delete(room_id, thread_root)
             await delete_thread(matrix_io, reg, room_id, thread_root)
             return
         if is_help_command(text):
             # Answer in the thread instead of typing "/help" into the agent's pane.
             await matrix_io.post_in_thread(thread_root, HELP_TEXT, room_id=room_id)
+            return
+        if local_chat is not None and local_chat.is_conversation(room_id, thread_root):
+            local_chat.reply_background(room_id, thread_root, text)
             return
         log.info(
             "thread reply received: room=%s thread_root=%s event_id=%s len=%d",
@@ -226,8 +253,11 @@ async def amain() -> None:
         if not target:
             return
         sess = reg.get_session_by_matrix_thread(target, room.room_id)
-        if sess is None:
+        is_local = local_chat is not None and local_chat.is_conversation(room.room_id, target)
+        if sess is None and not is_local:
             return  # reaction on some non-thread-root event; ignore
+        if local_chat is not None and is_local:
+            local_chat.delete(room.room_id, target)
         await delete_thread(matrix_io, reg, room.room_id, target)
 
     def _on_sync(response) -> None:
@@ -239,7 +269,9 @@ async def amain() -> None:
 
     client.add_event_callback(on_room_message, RoomMessageText)
     client.add_event_callback(on_reaction, ReactionEvent)
-    client.add_response_callback(_on_sync, SyncResponse)
+    # matrix-nio's annotation incorrectly declares a coroutine object here;
+    # runtime accepts this callback function and existing tests exercise it.
+    client.add_response_callback(_on_sync, SyncResponse)  # ty: ignore[invalid-argument-type]
 
     http_app = make_app(handlers)
     http_runner = web.AppRunner(http_app)
@@ -247,6 +279,20 @@ async def amain() -> None:
     http_site = web.TCPSite(http_runner, "127.0.0.1", cfg.port)
     await http_site.start()
     log.info("http event endpoint listening on 127.0.0.1:%d", cfg.port)
+    if local_chat is not None and cfg.local_llm.base_url is not None:
+        local_proxy = LocalLlmProxy(cfg.local_llm.base_url, local_chat, default_room)
+        local_proxy_runner = web.AppRunner(local_proxy.make_app())
+        await local_proxy_runner.setup()
+        local_proxy_site = web.TCPSite(
+            local_proxy_runner,
+            "127.0.0.1",
+            cfg.local_llm.web_proxy_port,
+        )
+        await local_proxy_site.start()
+        log.info(
+            "local model web proxy listening on 127.0.0.1:%d",
+            cfg.local_llm.web_proxy_port,
+        )
 
     # Re-attach transcript readers for sessions that the previous daemon instance
     # was already watching. Without this, a daemon restart would leave existing CC
@@ -277,6 +323,8 @@ async def amain() -> None:
     tasks.append(asyncio.create_task(reader_pump(supervisor)))
     tasks.append(asyncio.create_task(reaper(supervisor)))
     tasks.append(asyncio.create_task(watchdog_heartbeat()))
+    if local_chat is not None:
+        tasks.append(asyncio.create_task(local_chat.monitor_idle()))
 
     try:
         await stop_event.wait()
@@ -284,11 +332,15 @@ async def amain() -> None:
         log.info("shutting down")
         for t in tasks:
             t.cancel()
+        if local_chat is not None:
+            await local_chat.shutdown()
         await supervisor.shutdown()
         await client.close()
         if user_client is not None:
             await user_client.close()
         await http_runner.cleanup()
+        if local_proxy_runner is not None:
+            await local_proxy_runner.cleanup()
         reg.close()
 
 
