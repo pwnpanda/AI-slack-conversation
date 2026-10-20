@@ -12,8 +12,15 @@ from collections.abc import Callable
 from typing import Any
 
 import markdown
+from nio import ErrorResponse
 
 log = logging.getLogger(__name__)
+
+_RELATIONS_PAGE_SIZE = 100
+# Continuwuity's /relations advances only one event per page (see
+# thread_event_ids), so pages ~= thread size; this caps a runaway listing.
+_RELATIONS_MAX_PAGES = 5000
+_RELATIONS_REQUEST_TIMEOUT_SECONDS = 30
 
 
 def _render_html(body: str) -> str:
@@ -208,49 +215,63 @@ class MatrixIO:
 
     async def redact(self, room_id: str, event_id: str, reason: str = "deleted") -> None:
         """Redact a single event. The bot holds PL100 in rooms it created, so
-        it can redact anyone's events (its own, the puppet's, the human's)."""
-        await self._client.room_redact(room_id, event_id, reason=reason)
+        it can redact anyone's events (its own, the puppet's, the human's).
+
+        nio reports failures (rate limits, missing power) as a returned error
+        object rather than an exception; raise so callers see them.
+        """
+        resp = await self._client.room_redact(room_id, event_id, reason=reason)
+        if isinstance(resp, ErrorResponse):
+            raise RuntimeError(f"redact {event_id} in {room_id} failed: {resp}")
 
     async def thread_event_ids(self, room_id: str, thread_root: str) -> list[str]:
-        """Return the thread root plus every event related to it (m.thread
-        children AND their reactions/edits), newest-last. Used to redact a
-        whole thread. Paginates the /relations endpoint via REST since nio's
-        relation helpers don't expose recursive relations cleanly.
+        """Return the thread root plus every not-yet-redacted event related to
+        it (m.thread children AND their reactions/edits), root last. Used to
+        redact a whole thread. Paginates the /relations endpoint via REST
+        since nio's relation helpers don't expose recursive relations cleanly.
+
+        Continuwuity's next_batch moves the window back by a single event, so
+        each page repeats ~99 events from the previous one. Without dedupe a
+        600-event thread listed ~60000 IDs and each was redacted in turn.
         """
         import aiohttp
 
         base = str(self._client.homeserver).rstrip("/")
         headers = {"Authorization": f"Bearer {self._client.access_token}"}
-        ids: list[str] = []
-        url = (
-            f"{base}/_matrix/client/v1/rooms/{room_id}/relations/{thread_root}"
-            "?recurse=true&limit=100"
-        )
-        async with aiohttp.ClientSession() as http:
-            while url:
-                async with http.get(url, headers=headers) as resp:
+        url = f"{base}/_matrix/client/v1/rooms/{room_id}/relations/{thread_root}"
+        params = {"recurse": "true", "limit": str(_RELATIONS_PAGE_SIZE)}
+        timeout = aiohttp.ClientTimeout(total=_RELATIONS_REQUEST_TIMEOUT_SECONDS)
+        ids: dict[str, None] = {}  # insertion-ordered set
+        already_redacted: set[str] = set()
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            for _ in range(_RELATIONS_MAX_PAGES):
+                async with http.get(url, headers=headers, params=params) as resp:
                     if resp.status != 200:
                         body = await resp.text()
-                        log.warning(
-                            "relations fetch for %s failed (%s): %s",
-                            thread_root,
-                            resp.status,
-                            body[:200],
+                        raise RuntimeError(
+                            f"relations fetch for {thread_root} failed ({resp.status}): "
+                            f"{body[:200]}"
                         )
-                        break
                     data = await resp.json()
                 for child in data.get("chunk", []):
                     eid = child.get("event_id")
-                    if eid:
-                        ids.append(eid)
+                    if not eid:
+                        continue
+                    ids[eid] = None
+                    if child.get("unsigned", {}).get("redacted_because"):
+                        already_redacted.add(eid)
                 next_batch = data.get("next_batch")
-                if not next_batch:
+                if not next_batch or next_batch == params.get("from"):
                     break
-                url = (
-                    f"{base}/_matrix/client/v1/rooms/{room_id}/relations/{thread_root}"
-                    f"?recurse=true&limit=100&from={next_batch}"
+                params["from"] = next_batch
+            else:
+                log.warning(
+                    "relations for %s still paginating after %d pages; deleting %d found",
+                    thread_root,
+                    _RELATIONS_MAX_PAGES,
+                    len(ids),
                 )
         # Redact children first, root last, so clients don't briefly show an
         # orphaned root with dangling relations.
-        ids.append(thread_root)
-        return ids
+        children = [eid for eid in ids if eid not in already_redacted and eid != thread_root]
+        return [*children, thread_root]

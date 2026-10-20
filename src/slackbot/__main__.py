@@ -11,7 +11,7 @@ from nio import AsyncClient, ReactionEvent, RoomMessageText, SyncResponse
 
 from slackbot import sd_notify
 from slackbot.config import load_config
-from slackbot.deletion import delete_thread
+from slackbot.deletion import ThreadDeleter
 from slackbot.handlers import EventHandlers
 from slackbot.local_chat import LocalChatManager
 from slackbot.local_chat_store import LocalChatStore
@@ -172,6 +172,7 @@ async def amain() -> None:
         new_pane_delay_seconds=cfg.new_pane_delay_seconds,
         local_chat=local_chat,
     )
+    deleter = ThreadDeleter(matrix_io, reg)
 
     loop = asyncio.get_running_loop()
 
@@ -199,7 +200,7 @@ async def amain() -> None:
         if text.strip().lower() in ("/del", "/delete"):
             if local_chat is not None and local_chat.is_conversation(room_id, thread_root):
                 local_chat.delete(room_id, thread_root)
-            await delete_thread(matrix_io, reg, room_id, thread_root)
+            deleter.start(room_id, thread_root)
             return
         if is_help_command(text):
             # Answer in the thread instead of typing "/help" into the agent's pane.
@@ -258,7 +259,7 @@ async def amain() -> None:
             return  # reaction on some non-thread-root event; ignore
         if local_chat is not None and is_local:
             local_chat.delete(room.room_id, target)
-        await delete_thread(matrix_io, reg, room.room_id, target)
+        deleter.start(room.room_id, target)
 
     def _on_sync(response) -> None:
         nonlocal backlog_consumed
@@ -332,6 +333,7 @@ async def amain() -> None:
         log.info("shutting down")
         for t in tasks:
             t.cancel()
+        deleter.cancel_all()
         if local_chat is not None:
             await local_chat.shutdown()
         await supervisor.shutdown()

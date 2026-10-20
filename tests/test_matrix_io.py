@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 
+import nio
 import pytest
+from aiohttp import web
 
 from slackbot.matrix_io import MatrixIO, _emoji_for
 
@@ -219,3 +221,76 @@ async def test_no_user_client_means_as_user_falls_back_to_bot_client() -> None:
     # Requesting as_user with no user client wired: silently use the bot.
     await io.post_in_thread("$root:server", "ok", as_user=True)
     assert len(bot_client.sent) == 1
+
+
+def _sliding_relations_app(
+    thread: list[dict], seen_requests: list[dict], status: int = 200
+) -> web.Application:
+    """Mimic Continuwuity's /relations: newest-first pages of 100 whose
+    next_batch steps back only one event, so consecutive pages overlap."""
+
+    async def relations(request: web.Request) -> web.Response:
+        seen_requests.append(dict(request.query))
+        if status != 200:
+            return web.Response(status=status, text="nope")
+        offset = int(request.query.get("from", "0"))
+        limit = int(request.query["limit"])
+        chunk = thread[offset : offset + limit]
+        body: dict = {"chunk": chunk}
+        if offset + limit < len(thread):
+            body["next_batch"] = str(offset + 1)
+        return web.json_response(body)
+
+    app = web.Application()
+    app.router.add_get("/_matrix/client/v1/rooms/{room}/relations/{root}", relations)
+    return app
+
+
+@dataclass
+class FakeRestClient:
+    homeserver: str
+    access_token: str = "tok"
+    redact_response: object = None
+
+    async def room_redact(self, room_id, event_id, reason=None):
+        return self.redact_response
+
+
+def _child(n: int, redacted: bool = False) -> dict:
+    event: dict = {"event_id": f"$c{n}"}
+    if redacted:
+        event["unsigned"] = {"redacted_because": {"event_id": "$r"}}
+    return event
+
+
+async def test_thread_event_ids_dedupes_overlapping_pages(aiohttp_server) -> None:
+    thread = [_child(n) for n in range(250, 0, -1)]
+    requests: list[dict] = []
+    server = await aiohttp_server(_sliding_relations_app(thread, requests))
+    io = MatrixIO(FakeRestClient(str(server.make_url(""))), room_id="!r:server")
+    ids = await io.thread_event_ids("!r:server", "$root")
+    assert ids == [e["event_id"] for e in thread] + ["$root"]
+    assert requests[0] == {"recurse": "true", "limit": "100"}
+
+
+async def test_thread_event_ids_skips_already_redacted(aiohttp_server) -> None:
+    thread = [_child(3), _child(2, redacted=True), _child(1)]
+    server = await aiohttp_server(_sliding_relations_app(thread, []))
+    io = MatrixIO(FakeRestClient(str(server.make_url(""))), room_id="!r:server")
+    assert await io.thread_event_ids("!r:server", "$root") == ["$c3", "$c1", "$root"]
+
+
+async def test_thread_event_ids_raises_on_http_error(aiohttp_server) -> None:
+    server = await aiohttp_server(_sliding_relations_app([], [], status=403))
+    io = MatrixIO(FakeRestClient(str(server.make_url(""))), room_id="!r:server")
+    with pytest.raises(RuntimeError, match="403"):
+        await io.thread_event_ids("!r:server", "$root")
+
+
+async def test_redact_raises_on_error_response() -> None:
+    client = FakeRestClient(
+        "http://unused", redact_response=nio.RoomRedactError("slow down", "M_LIMIT_EXCEEDED")
+    )
+    io = MatrixIO(client, room_id="!r:server")
+    with pytest.raises(RuntimeError, match="M_LIMIT_EXCEEDED"):
+        await io.redact("!r:server", "$e")
